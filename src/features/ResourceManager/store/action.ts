@@ -4,7 +4,7 @@ import type { ResourceManagerMode } from '@/features/ResourceManager';
 import { useFileStore } from '@/store/file';
 import type { StoreSetter } from '@/store/types';
 import { flattenActions } from '@/store/utils/flattenActions';
-import type { FilesTabs, SortType } from '@/types/files';
+import type { FilesTabs, ResourceSourceFilter, SortType } from '@/types/files';
 
 import type { ResourceListVisibilityFilter, SelectAllState, State, ViewMode } from './initialState';
 import { DEFAULT_WORKSPACE_LIST_VISIBILITY, initialState } from './initialState';
@@ -57,6 +57,12 @@ export class ResourceManagerStoreActionImpl {
 
     switch (type) {
       case 'delete': {
+        // The explorer's own list is optimistic, but the sidebar tree keeps a
+        // separate per-folder cache: without this it holds deleted folders
+        // until the next full load.
+        const { useTreeStore } = await import('@/store/tree');
+        const currentFolderKey = fileStore.queryParams?.parentId ?? '';
+
         if (selectAllState === 'all' && fileStore.queryParams) {
           const { resourceService } = await import('@/services/resource');
 
@@ -70,6 +76,9 @@ export class ResourceManagerStoreActionImpl {
           // Revalidate so any surviving rows immediately reappear.
           const { revalidateResources } = await import('@/store/file/slices/resource/hooks');
           await revalidateResources(fileStore.queryParams);
+          // The deleted set is only known to the server here, and every row in
+          // it was a child of the listed folder, so refetch that one folder.
+          void useTreeStore.getState().revalidate(currentFolderKey);
 
           this.clearSelectAllState();
           return;
@@ -79,6 +88,7 @@ export class ResourceManagerStoreActionImpl {
           selectAllState === 'all' ? await resolveSelectedResourceIds() : selectedFileIds;
 
         await fileStore.deleteResources(resourceIds);
+        void useTreeStore.getState().dropNodes(resourceIds, currentFolderKey);
 
         this.clearSelectAllState();
         return;
@@ -154,15 +164,54 @@ export class ResourceManagerStoreActionImpl {
   };
 
   setCategory = (category: FilesTabs): void => {
-    this.#set({ category });
+    // Drop any explicit source pick so the new category falls back to its own
+    // default — an "AI generated" choice made under Images must not silently
+    // hide every uploaded file under Documents.
+    this.#set({ category, sourceFilter: undefined });
+  };
+
+  setSourceFilter = (sourceFilter: ResourceSourceFilter): void => {
+    if (this.#get().sourceFilter === sourceFilter) return;
+
+    // The visible pool changes, so a standing "select all" would target rows
+    // that are no longer on screen — same reset as the visibility toggle.
+    this.#set({
+      selectAllState: 'none',
+      selectedFileIds: [],
+      selectionTotal: undefined,
+      sourceFilter,
+    });
+
+    // Drop the previous source's rows immediately, exactly as the visibility
+    // toggle does. Without this the old rows stay on screen and interactive
+    // under the newly active chip until the fetch lands — and a "select all"
+    // fired in that window resolves against `useFileStore.queryParams`, which
+    // still carries the previous source, so the following batch action would
+    // target rows the user is no longer looking at.
+    useFileStore.getState().clearCurrentQueryResources();
   };
 
   setCurrentViewItemId = (currentViewItemId?: string): void => {
     this.#set({ currentViewItemId });
   };
 
+  closeDetailPanel = (): void => {
+    this.#set({ detailPanelId: undefined, detailPanelIsPage: false });
+  };
+
+  openDetailPanel = (detailPanelId: string, isPage = false): void => {
+    this.#set({ detailPanelId, detailPanelIsPage: isPage });
+  };
+
   setLibraryId = (libraryId?: string): void => {
-    this.#set({ libraryId });
+    if (this.#get().libraryId === libraryId) return;
+    // A sidebar search is scoped to one library; carrying it over to the next
+    // library would show results the user never asked for.
+    this.#set({ libraryId, librarySearchQuery: '' });
+  };
+
+  setLibrarySearchQuery = (librarySearchQuery: string): void => {
+    this.#set({ librarySearchQuery });
   };
 
   setListVisibility = (
@@ -222,6 +271,10 @@ export class ResourceManagerStoreActionImpl {
 
   setPendingRenameItemId = (pendingRenameItemId: string | null): void => {
     this.#set({ pendingRenameItemId });
+  };
+
+  setPendingTreeRenameItemId = (pendingTreeRenameItemId: string | null): void => {
+    this.#set({ pendingTreeRenameItemId });
   };
 
   setSearchQuery = (searchQuery: string | null): void => {

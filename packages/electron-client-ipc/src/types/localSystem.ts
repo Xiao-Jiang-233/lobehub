@@ -88,6 +88,10 @@ export interface RenameLocalFileResult {
   success: boolean;
 }
 
+export interface HashLocalFileParams {
+  path: string;
+}
+
 export interface LocalReadFileParams {
   /** Working directory a relative `path` resolves against. See {@link ListLocalFileParams.cwd}. */
   cwd?: string;
@@ -236,6 +240,11 @@ export interface LocalReadFileResult {
    * Total line count of the entire file.
    */
   totalLineCount: number;
+  /**
+   * True when the content was cut at the output character cap before the
+   * requested `loc` window ended.
+   */
+  truncated?: boolean;
 }
 
 export interface LocalSearchFilesParams {
@@ -270,6 +279,13 @@ export interface LocalSearchFilesParams {
 }
 
 export interface ProjectFileIndexEntry {
+  /**
+   * Directory whose children were deliberately left out of the index because
+   * Git collapsed it (`git ls-files --directory` reports a fully ignored
+   * directory as a single entry). The row is expandable, but its children must
+   * be fetched on demand via `listProjectDirectory`.
+   */
+  collapsed?: boolean;
   /** Whether Git ignore rules match this file or directory. */
   gitIgnored?: boolean;
   isDirectory: boolean;
@@ -290,7 +306,47 @@ export interface ProjectFileIndexResult {
   source: 'git' | 'glob';
 }
 
+export interface ProjectDirectoryListParams {
+  /** Cap on returned children; the caller is told when more exist. */
+  limit?: number;
+  /** Directory to list, relative to `root`. A trailing slash is tolerated. */
+  relativePath: string;
+  /** Project root the returned `relativePath`s are resolved against. */
+  root: string;
+}
+
+export interface ProjectDirectoryListResult {
+  entries: ProjectFileIndexEntry[];
+  /** True when the directory holds more children than `limit` returned. */
+  truncated: boolean;
+}
+
+export interface TrashLocalFilesParams {
+  paths: string[];
+}
+
+export interface TrashLocalFilesResultItem {
+  /** Error message if this specific path failed. */
+  error?: string;
+  /** The path as it was requested, so the caller can reconcile its own rows. */
+  path: string;
+  success: boolean;
+}
+
+export interface TrashLocalFilesResult {
+  /**
+   * Per-path outcome, in request order. A batch is not atomic: an earlier path
+   * can already be in the trash when a later one fails, so the caller needs
+   * this to reconcile its tree and to retry only what is left.
+   */
+  items: TrashLocalFilesResultItem[];
+  /** True only when every path was trashed. */
+  success: boolean;
+}
+
 export interface ProjectFileSearchParams extends ProjectFileIndexParams {
+  changedOnly?: boolean;
+  excludeIgnored?: boolean;
   limit?: number;
   query: string;
 }
@@ -319,7 +375,77 @@ export interface RunCommandParams {
   /** Merged into the child process environment (after `process.env`). */
   env?: Record<string, string>;
   run_in_background?: boolean;
+  /**
+   * Run this command inside the device sandbox (writes confined to `cwd` + the
+   * OS temp dir, no network). Set by the caller that knows the agent picked the
+   * "Local Sandbox" execution environment — the server device-proxy for
+   * gateway-routed runs, the client executor for in-process desktop runs. The
+   * model never supplies it: the manifest doesn't expose it, and it is a
+   * user-owned security decision, not a per-call one.
+   *
+   * Absent/false keeps the historical unsandboxed path, so nothing changes for
+   * agents that never opted in. When true the sandbox is mandatory — a host
+   * that cannot provide one fails the command instead of downgrading.
+   */
+  sandbox?: boolean;
+  /**
+   * Let a sandboxed command reach the package-registry allowlist. Ignored
+   * unless `sandbox` is true. Never means "the network is open" — the backend
+   * refuses a catch-all allowlist, so this opens a fixed, named set of
+   * registries and forges and nothing else.
+   */
+  sandboxNetwork?: boolean;
   timeout?: number;
+}
+
+/**
+ * Whether this device can actually run sandboxed commands, as reported by the
+ * desktop main process. The renderer needs the real answer (not a platform
+ * guess) before offering the "Local Sandbox" option: SRT supports macOS and
+ * Linux only, and on Linux it additionally depends on host binaries that may be
+ * missing.
+ */
+export interface DeviceSandboxCapabilityResult {
+  available: boolean;
+  /**
+   * The app can provision the backend itself on this host (one UAC prompt on
+   * Windows). Lets the UI offer a setup button instead of a dead end — a user
+   * who installed the desktop app should not have to run anything by hand
+   * before the sandbox works.
+   */
+  canInstall: boolean;
+  /** What to do by hand when the app cannot install it (e.g. Linux packages). */
+  instructions?: string;
+  /** Human-readable explanation when `available` is false. */
+  reason?: string;
+}
+
+/**
+ * Result of a user-initiated sandbox setup, plus the capability re-read
+ * afterwards so the caller never has to guess whether it took.
+ */
+export interface DeviceSandboxInstallResult {
+  capability: DeviceSandboxCapabilityResult;
+  /** Failure detail when `status` is `failed`. */
+  error?: string;
+  /** `cancelled` means the user dismissed the elevation prompt — not a failure. */
+  status: 'cancelled' | 'failed' | 'installed' | 'not-installable';
+}
+
+export interface EnsureSandboxWorkspaceParams {
+  /** Scopes the workspace per agent, so two agents never share a fence root. */
+  agentId: string;
+}
+
+export interface EnsureSandboxWorkspaceResult {
+  /**
+   * Absolute path of the created directory. Absent when it could not be
+   * created — the caller then leaves the working directory unset rather than
+   * pointing it at something that does not exist.
+   */
+  path?: string;
+  /** Why the directory could not be created. */
+  reason?: string;
 }
 
 export interface RunCommandResult {
@@ -331,6 +457,11 @@ export interface RunCommandResult {
     stderr: { path: string; size: number; truncated: boolean };
     stdout: { path: string; size: number; truncated: boolean };
   };
+  /**
+   * Whether the command was actually confined by the device sandbox — what
+   * happened, not what was requested. Absent when no sandbox was asked for.
+   */
+  sandboxed?: boolean;
   shell_id?: string;
   stderr?: string;
   stdout?: string;

@@ -1,7 +1,11 @@
 import type { LobeAgentChatConfig } from '../agent/chatConfig';
-import type { WorkingDirConfig } from '../device';
+import type { CreateThreadWithMessageParams } from '../aiChat';
+import type { DeviceUnavailableErrorData, WorkingDirConfig } from '../device';
 import type { TaskDetail, UIChatMessage } from '../message';
 import type { ChatTopic } from '../topic';
+
+export * from './credentialFacts';
+export * from './modelFacts';
 
 export type AgentSignalOperationKind =
   'memory' | 'nightly-review' | 'self-feedback-intent' | 'self-reflection' | 'skill';
@@ -68,6 +72,11 @@ export interface ExecAgentAppContext {
    * Forwarded into the operation so the completion path can project receipts.
    */
   agentSignal?: AgentSignalOperationMarker;
+  /**
+   * Agent that owns the conversation when it differs from the agent executing
+   * this run (for example, a single explicit @Agent direct route).
+   */
+  conversationAgentId?: string;
   /** Optional default assignee candidate for task manager prompts */
   defaultTaskAssigneeAgentId?: string;
   /** Current document ID for page-scoped conversations */
@@ -80,6 +89,18 @@ export interface ExecAgentAppContext {
    * itself.
    */
   editingAgentId?: string;
+  /**
+   * When scope is 'group_agent_builder', the ID of the group being edited (the
+   * group whose Profile page the user opened the builder panel on).
+   *
+   * Deliberately NOT `groupId`: that field marks the run as a *group chat* turn
+   * and gets stamped onto the created topic and messages, which would pull the
+   * builder's private side-conversation into the group's message read path
+   * (`MessageModel.query` filters group chats by `messages.groupId`). The
+   * builder conversation stays owned by the builtin builder agent; only the
+   * group-agent-builder tool runtime and its context injector read this field.
+   */
+  editingGroupId?: string;
   /** Group ID for group chat */
   groupId?: string | null;
   /**
@@ -92,10 +113,33 @@ export interface ExecAgentAppContext {
     workingDirectoryConfig?: WorkingDirConfig;
   };
   /**
+   * Whether this operation runs inside an isolation thread spawned by another
+   * operation on the same topic (callAgent / callSubAgent / group member).
+   *
+   * Such a run is a guest on its parent's topic: it must not claim or clear the
+   * topic's `runningOperation` mark, which is the parent run's gateway reconnect
+   * anchor. Broader than `isSubAgent` on purpose — the `execSubAgent` (callAgent)
+   * path passes `isSubAgent: false` yet is just as much a guest.
+   */
+  isolationThread?: boolean;
+  /**
    * Whether this operation is an isolated sub-agent execution. Used to disable
    * recursive sub-agent dispatch.
    */
   isSubAgent?: boolean;
+  /**
+   * Branch this run into a NEW thread (subtopic) under `topicId`, persisting the
+   * turn there instead of on the topic's main spine.
+   *
+   * Same intent the non-gateway send path expresses as `newThread` on
+   * `aiChat.sendMessageInServer`. The gateway path skips that call entirely, so
+   * without carrying it here the subtopic silently collapses back into the main
+   * conversation and no thread row is ever created.
+   *
+   * Ignored when `threadId` is already set — that is a follow-up inside an
+   * existing thread, which needs no new row.
+   */
+  newThread?: CreateThreadWithMessageParams;
   /**
    * Orchestration role of the agent for this group run. `'supervisor'` for the
    * group's coordinating agent (execGroupAgent), `'member'` for delegated members
@@ -133,6 +177,12 @@ export interface ExecAgentAppContext {
   threadId?: string | null;
   /** Topic ID */
   topicId?: string | null;
+  /**
+   * Goal detail page the conversation is happening on. The server builds
+   * `RuntimeInitialContext.goalOverview` from the goal graph so the agent can
+   * answer progress questions without tool calls.
+   */
+  viewedGoal?: { goalId: string };
 }
 
 /**
@@ -187,6 +237,8 @@ export interface ExecAgentParams {
    * use the internal `files` param instead.
    */
   fileIds?: string[];
+  /** Opt into runtime state snapshots on step_complete events. Defaults to false. */
+  includeFinalState?: boolean;
   /** Additional system instructions appended after the agent's own system role */
   instructions?: string;
   /** Current desktop's device ID; used only when the effective target is `local`. */
@@ -203,6 +255,11 @@ export interface ExecAgentParams {
   prompt: string;
   /** Override the agent's default provider */
   provider?: string;
+  /**
+   * Existing topic operation this fresh turn atomically supersedes. The server
+   * accepts the handoff only while the topic marker still belongs to this id.
+   */
+  replacesOperationId?: string;
   /** The agent slug to run (either agentId or slug is required) */
   slug?: string;
   /**
@@ -251,9 +308,7 @@ export interface ScheduleAgentRunResult {
   topicId: string;
 }
 
-/**
- * Response from execAgent
- */
+/** Response from execAgent. */
 export interface ExecAgentResult {
   /** The resolved agent ID */
   agentId: string;
@@ -263,8 +318,18 @@ export interface ExecAgentResult {
   autoStarted: boolean;
   /** Timestamp when operation was created */
   createdAt: string;
+  /** The thread created for this run when `appContext.newThread` was supplied. */
+  createdThreadId?: string;
   /** Error message if operation failed to start */
   error?: string;
+  /** Structured availability context when a device dispatch failed before acceptance. */
+  errorData?: DeviceUnavailableErrorData;
+  /**
+   * External heterogeneous producer for this run. `null` explicitly denotes
+   * the normal AgentRuntime path; `undefined` is reserved for rolling clients
+   * talking to an older server that did not yet return this discriminator.
+   */
+  heteroType?: string | null;
   /** Status message */
   message: string;
   /** Queue message ID if auto-started */
@@ -275,6 +340,20 @@ export interface ExecAgentResult {
   status: string;
   /** Whether the operation was created successfully */
   success: boolean;
+  /**
+   * The failure was already announced through the run's terminal lifecycle —
+   * `CompletionLifecycle` fired its `onComplete` hooks, so every consumer of
+   * those hooks (IM bot completion callback, task lifecycle) has been told.
+   *
+   * Callers that render failures themselves must not report it a second time:
+   * a hetero dispatch failure finalizes the run AND returns `success: false`,
+   * which used to put two error messages in the same IM thread. Absent /
+   * `false` means no hook consumer was reachable, so the caller owns the
+   * report — as it still does when delivery itself fails, because a hook with
+   * no fallback throws `CriticalHookDeliveryError` out of `execAgent` instead
+   * of resolving to this result.
+   */
+  terminalReported?: boolean;
   /** ISO timestamp */
   timestamp: string;
   /** Short-lived JWT token for Gateway WebSocket authentication */

@@ -12,7 +12,8 @@ import type { ErrorAttribution, ErrorCategory, ErrorSeverity } from './taxonomy'
 export type CloudErrorCode =
   | typeof ChatErrorType.FreePlanLimit
   | typeof ChatErrorType.InsufficientBudgetForModel
-  | typeof ChatErrorType.LobeHubModelDeprecated;
+  | typeof ChatErrorType.LobeHubModelDeprecated
+  | typeof ChatErrorType.SubscriptionPlanLimit;
 
 /** Every code the spec table can classify. */
 export type SpecErrorCode = CloudErrorCode | ILobeAgentRuntimeErrorType;
@@ -49,6 +50,9 @@ export interface ErrorCodeSpec {
 
   /** Whether transport-level retry is allowed. */
   retryable: boolean;
+
+  /** Whether RouterRuntime may continue with a different route option. */
+  routeFallback?: boolean;
 
   severity: ErrorSeverity;
 }
@@ -191,6 +195,18 @@ export const ERROR_CODE_SPECS: SpecMap = {
     countAsFailure: false,
     description: 'LobeHub Cloud balance is positive but below the model’s estimated cost.',
   },
+  [ChatErrorType.SubscriptionPlanLimit]: {
+    code: ChatErrorType.SubscriptionPlanLimit,
+    numericId: 2903,
+    category: 'quota',
+    severity: 'warning',
+    attribution: 'user',
+    httpStatus: 402,
+    retryable: false,
+    countAsFailure: false,
+    description:
+      'LobeHub Cloud paid-plan allowance reached, or the plan tier does not cover the requested model.',
+  },
 
   // ─── 3xxx Capacity ────────────────────────────────────────────────────
   [AgentRuntimeErrorType.RateLimitExceeded]: {
@@ -269,6 +285,7 @@ export const ERROR_CODE_SPECS: SpecMap = {
     attribution: 'user',
     httpStatus: 400,
     retryable: false,
+    routeFallback: false,
     countAsFailure: false,
     description: 'Prompt + tool payload exceeds the model context window.',
   },
@@ -302,8 +319,21 @@ export const ERROR_CODE_SPECS: SpecMap = {
     attribution: 'user',
     httpStatus: 400,
     retryable: false,
+    routeFallback: false,
     countAsFailure: false,
     description: 'Upstream rejected the request as malformed (bad JSON / schema / parameters).',
+  },
+  [AgentRuntimeErrorType.RequestBodyTooLarge]: {
+    code: AgentRuntimeErrorType.RequestBodyTooLarge,
+    numericId: 4006,
+    category: 'request',
+    severity: 'warning',
+    attribution: 'user',
+    httpStatus: 400,
+    retryable: false,
+    routeFallback: false,
+    countAsFailure: false,
+    description: 'Upstream rejected the serialized request body as too large.',
   },
   // —— Cloud-only (tier 9) ——
   [ChatErrorType.LobeHubModelDeprecated]: {
@@ -342,6 +372,18 @@ export const ERROR_CODE_SPECS: SpecMap = {
     retryable: true,
     countAsFailure: false,
     description: 'Connection timeout / network drop talking to the provider.',
+  },
+  [AgentRuntimeErrorType.RemoteMediaDownloadTimeout]: {
+    code: AgentRuntimeErrorType.RemoteMediaDownloadTimeout,
+    numericId: 6002,
+    category: 'network',
+    severity: 'warning',
+    attribution: 'system',
+    httpStatus: 504,
+    retryable: false,
+    routeFallback: true,
+    countAsFailure: false,
+    description: 'Provider timed out while downloading a remote image or file URL.',
   },
 
   // ─── 7xxx Stream / Runtime ────────────────────────────────────────────
@@ -431,6 +473,21 @@ export const ERROR_CODE_SPECS: SpecMap = {
       'State-store (Redis / Upstash) read failed: a blocking read (XREAD / BLPOP) aborted because the caller disconnected ("ERR caller gone"), or the operation\'s agent state could not be loaded ("Agent state not found for operation …"). System-side — counts as a failure.',
   },
 
+  [AgentRuntimeErrorType.HarnessJsonParseError]: {
+    code: AgentRuntimeErrorType.HarnessJsonParseError,
+    numericId: 7008,
+    category: 'stream',
+    severity: 'error',
+    attribution: 'harness',
+    httpStatus: 500,
+    // Deterministic: the same corrupt payload re-parses to the same failure, so
+    // a transport retry only re-burns the run's tokens.
+    retryable: false,
+    countAsFailure: true,
+    description:
+      'A harness-side `JSON.parse` threw on data the harness produced or stored ("… in JSON at position N" / "Unexpected end of JSON input") — a serialization bug, not an upstream response.',
+  },
+
   // ─── 8xxx Provider (catch-all) ────────────────────────────────────────
   [AgentRuntimeErrorType.AgentRuntimeError]: {
     code: AgentRuntimeErrorType.AgentRuntimeError,
@@ -464,6 +521,7 @@ export const ERROR_CODE_SPECS: SpecMap = {
     attribution: 'provider',
     httpStatus: 471,
     retryable: false,
+    routeFallback: false,
     countAsFailure: true,
     description: 'Image-generation provider returned no image.',
   },
@@ -541,6 +599,7 @@ export const ERROR_CODE_SPECS: SpecMap = {
     attribution: 'user',
     httpStatus: 471,
     retryable: false,
+    routeFallback: false,
     countAsFailure: false,
     description: 'Provider blocked the request or generated output due to content policy.',
   },

@@ -1,4 +1,5 @@
 import type { AgentStreamEvent } from '@lobechat/agent-gateway-client';
+import { createAdapter } from '@lobechat/heterogeneous-agents';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { messageService } from '@/services/message';
@@ -55,12 +56,14 @@ function createMockStore() {
     internal_toggleToolCallingStreaming: vi.fn(),
     markTopicUnread: vi.fn(),
     messagesMap: {} as Record<string, any>,
+    topicDataMap: {},
     operations: {
       'op-1': {
         context: { agentId: 'agent-1', scope: 'session', topicId: 'topic-1' },
         metadata: { startTime: 0 },
       },
     } as Record<string, any>,
+    operationsByContext: {},
     replaceMessages: vi.fn(),
     startOperation: vi.fn(() => {
       reasoningCounter += 1;
@@ -855,6 +858,45 @@ describe('createGatewayEventHandler', () => {
       );
     });
 
+    it('dispatches a Kimi Code Shell result through the registered renderer hook contract', async () => {
+      const store = createMockStore();
+      const handler = createHandler(store);
+      const onAfterCall = vi.fn().mockResolvedValue(undefined);
+      getExecutorMock.mockReturnValueOnce({ onAfterCall });
+      const adapter = createAdapter('kimi-code');
+
+      adapter.adapt({
+        role: 'assistant',
+        tool_calls: [
+          {
+            function: {
+              arguments: JSON.stringify({ command: 'git worktree add /tmp/kimi-wt' }),
+              name: 'Shell',
+            },
+            id: 'kimi-shell-1',
+            type: 'function',
+          },
+        ],
+      });
+      const toolEnd = adapter
+        .adapt({ content: 'created', role: 'tool', tool_call_id: 'kimi-shell-1' })
+        .find((event) => event.type === 'tool_end');
+
+      expect(toolEnd).toBeDefined();
+      handler(makeEvent('tool_end', toolEnd!.data));
+      await flush();
+
+      expect(getExecutorMock).toHaveBeenCalledWith('kimi-code');
+      expect(onAfterCall).toHaveBeenCalledWith({
+        apiName: 'Shell',
+        identifier: 'kimi-code',
+        params: { command: 'git worktree add /tmp/kimi-wt' },
+        result: { content: 'created', success: true },
+        toolCallId: 'kimi-shell-1',
+        topicId: 'topic-1',
+      });
+    });
+
     it('should skip onAfterCall when payload identifier/apiName are missing', async () => {
       const store = createMockStore();
       const handler = createHandler(store);
@@ -1068,11 +1110,11 @@ describe('createGatewayEventHandler', () => {
       expect(store.completeOperation).not.toHaveBeenCalled();
       expect(messageService.updateMessageError).toHaveBeenCalledWith(
         'msg-initial',
-        {
+        expect.objectContaining({
           body: { message: 'Something went wrong' },
           message: 'Something went wrong',
           type: 'AgentRuntimeError',
-        },
+        }),
         {
           agentId: 'agent-1',
           groupId: undefined,
@@ -1087,11 +1129,11 @@ describe('createGatewayEventHandler', () => {
           id: 'msg-initial',
           type: 'updateMessage',
           value: {
-            error: {
+            error: expect.objectContaining({
               body: { message: 'Something went wrong' },
               message: 'Something went wrong',
               type: 'AgentRuntimeError',
-            },
+            }),
           },
         },
         { operationId: 'op-1' },
@@ -1117,11 +1159,11 @@ describe('createGatewayEventHandler', () => {
       expect(store.completeOperation).not.toHaveBeenCalled();
       expect(messageService.updateMessageError).toHaveBeenCalledWith(
         'msg-step2',
-        {
-          body: { message: 'Timeout' },
+        expect.objectContaining({
+          body: { error: 'Timeout' },
           message: 'Timeout',
           type: 'AgentRuntimeError',
-        },
+        }),
         {
           agentId: 'agent-1',
           groupId: undefined,
@@ -1137,7 +1179,7 @@ describe('createGatewayEventHandler', () => {
           value: expect.objectContaining({
             error: expect.objectContaining({
               message: 'Timeout',
-              body: { message: 'Timeout' },
+              body: { error: 'Timeout' },
             }),
           }),
         }),
@@ -1167,33 +1209,37 @@ describe('createGatewayEventHandler', () => {
 
       expect(messageService.updateMessageError).toHaveBeenCalledWith(
         'msg-initial',
-        {
+        expect.objectContaining({
+          errorRef: 'H8001',
           body: {
             agentType: 'codex',
             code: 'cli_not_found',
+            details: { kind: 'cli_not_found' },
             docsUrl: 'https://github.com/openai/codex',
             installCommands: ['npm install -g @openai/codex'],
             message: 'Codex CLI was not found',
           },
           message: 'Codex CLI was not found',
           type: 'AgentRuntimeError',
-        },
+        }),
         expect.any(Object),
       );
       expect(store.internal_dispatchMessage).toHaveBeenCalledWith(
         expect.objectContaining({
           value: {
-            error: {
+            error: expect.objectContaining({
+              errorRef: 'H8001',
               body: {
                 agentType: 'codex',
                 code: 'cli_not_found',
+                details: { kind: 'cli_not_found' },
                 docsUrl: 'https://github.com/openai/codex',
                 installCommands: ['npm install -g @openai/codex'],
                 message: 'Codex CLI was not found',
               },
               message: 'Codex CLI was not found',
               type: 'AgentRuntimeError',
-            },
+            }),
           },
         }),
         { operationId: 'op-1' },
@@ -1437,7 +1483,7 @@ describe('createGatewayEventHandler', () => {
             provider: 'lobehub',
           }),
           message: 'Payment required',
-          type: 'ProviderBizError',
+          type: 'InsufficientQuota',
         }),
         expect.anything(),
       );

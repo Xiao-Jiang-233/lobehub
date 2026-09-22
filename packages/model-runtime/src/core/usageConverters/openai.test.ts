@@ -5,6 +5,18 @@ import { describe, expect, it } from 'vitest';
 import { convertOpenAIImageUsage, convertOpenAIResponseUsage, convertOpenAIUsage } from './openai';
 
 describe('convertUsage', () => {
+  it('distinguishes an explicit zero cache read from missing cache usage', () => {
+    const usage = { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 };
+    expect(convertOpenAIUsage(usage).inputCachedTokens).toBeUndefined();
+    expect(
+      convertOpenAIUsage({ ...usage, prompt_tokens_details: { cached_tokens: 0 } })
+        .inputCachedTokens,
+    ).toBe(0);
+    expect(
+      convertOpenAIUsage({ ...usage, prompt_cache_hit_tokens: 0 } as typeof usage)
+        .inputCachedTokens,
+    ).toBe(0);
+  });
   it('should convert basic OpenAI usage data correctly', () => {
     // Arrange
     const openaiUsage: OpenAI.Completions.CompletionUsage = {
@@ -118,6 +130,7 @@ describe('convertUsage', () => {
     expect(result).toEqual({
       inputTextTokens: 2000,
       inputWriteCacheTokens: 1500,
+      inputCachedTokens: 0,
       // uncached 1× bucket must not include writes (2000 - 0 - 1500)
       inputCacheMissTokens: 500,
       totalInputTokens: 2000,
@@ -125,7 +138,7 @@ describe('convertUsage', () => {
       outputTextTokens: 100,
       totalTokens: 2100,
     });
-    expect(result).not.toHaveProperty('inputCachedTokens');
+    expect(result.inputCachedTokens).toBe(0);
   });
 
   it('should split miss / read / write when both cache hit and write are present', () => {
@@ -243,13 +256,64 @@ describe('convertUsage', () => {
 
     // Assert
     expect(result).toEqual({
-      inputTextTokens: 100,
+      inputTextTokens: 80,
       inputAudioTokens: 20,
       totalInputTokens: 100,
       totalOutputTokens: 50,
       outputTextTokens: 50,
       totalTokens: 150,
     });
+  });
+
+  it('distinguishes omitted provider audio usage from an explicitly reported zero', () => {
+    const omitted = convertOpenAIUsage({
+      completion_tokens: 1,
+      prompt_tokens: 10,
+      total_tokens: 11,
+    } as OpenAI.Completions.CompletionUsage);
+    const reportedZero = convertOpenAIUsage({
+      completion_tokens: 1,
+      prompt_tokens: 10,
+      prompt_tokens_details: { audio_tokens: 0 },
+      total_tokens: 11,
+    } as OpenAI.Completions.CompletionUsage);
+
+    expect(omitted).not.toHaveProperty('inputAudioTokens');
+    expect(reportedZero).toHaveProperty('inputAudioTokens', 0);
+  });
+
+  it('should not double-charge aggregate OpenAI prompt tokens when audio has a dedicated unit', () => {
+    const pricing: Pricing = {
+      units: [
+        { name: 'textInput', rate: 1, strategy: 'fixed', unit: 'millionTokens' },
+        { name: 'audioInput', rate: 10, strategy: 'fixed', unit: 'millionTokens' },
+      ],
+    };
+    const usageWithAudioInput = {
+      completion_tokens: 50,
+      prompt_tokens: 100,
+      prompt_tokens_details: { audio_tokens: 20 },
+      total_tokens: 150,
+    } as OpenAI.Completions.CompletionUsage;
+
+    const result = convertOpenAIUsage(usageWithAudioInput, { pricing });
+
+    expect(result.inputTextTokens).toBe(80);
+    expect(result.inputAudioTokens).toBe(20);
+    expect(result.cost).toBe(0.000_28);
+  });
+
+  it('does not guess cached audio tokens from OpenAI aggregate cache usage', () => {
+    const result = convertOpenAIUsage({
+      completion_tokens: 10,
+      prompt_tokens: 100,
+      prompt_tokens_details: { audio_tokens: 20, cached_tokens: 40 },
+      total_tokens: 110,
+    } as OpenAI.Completions.CompletionUsage);
+
+    expect(result.inputAudioTokens).toBe(20);
+    expect(result.inputCachedTokens).toBe(40);
+    expect(result).not.toHaveProperty('inputCachedAudioTokens');
   });
 
   it('should handle detailed output tokens correctly', () => {
@@ -330,7 +394,7 @@ describe('convertUsage', () => {
 
     // Assert
     expect(result).toEqual({
-      inputTextTokens: 150,
+      inputTextTokens: 100,
       inputAudioTokens: 50,
       inputCachedTokens: 40,
       inputCacheMissTokens: 140, // 180 - 40 (totalInputTokens - cachedTokens)
@@ -488,6 +552,7 @@ describe('convertUsage', () => {
     expect(result).toEqual({
       inputTextTokens: 100,
       inputCacheMissTokens: 100, // 100 - 0
+      inputCachedTokens: 0,
       totalInputTokens: 100,
       totalOutputTokens: 200,
       outputImageTokens: 60,

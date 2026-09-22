@@ -1,8 +1,9 @@
 import { type BuiltinAgentSlug } from '@lobechat/builtin-agents';
 import { BUILTIN_AGENTS } from '@lobechat/builtin-agents';
-import { DEFAULT_AGENT_CONFIG } from '@lobechat/const';
+import { DEFAULT_PROVIDER } from '@lobechat/business-const';
+import { DEFAULT_AGENT_CONFIG, DEFAULT_MODEL } from '@lobechat/const';
 import { type LobeChatDatabase } from '@lobechat/database';
-import { type AgentItem, type LobeAgentConfig } from '@lobechat/types';
+import { type AgentItem, type LobeAgentChatConfig, type LobeAgentConfig } from '@lobechat/types';
 import { cleanObject, merge } from '@lobechat/utils';
 import { TRPCError } from '@trpc/server';
 import debug from 'debug';
@@ -31,7 +32,14 @@ const log = debug('lobe-agent:service');
  * Used when returning agent config from database (id is always present).
  */
 export type AgentConfigWithId = LobeAgentConfig &
-  Pick<AgentItem, 'id' | 'slug' | 'userId' | 'visibility' | 'workspaceId'>;
+  Pick<AgentItem, 'id' | 'slug' | 'userId' | 'visibility' | 'workspaceId'> & {
+    /**
+     * Raw callSubAgent chatConfig override, stamped by execAgent alongside the
+     * merged chatConfig. The LLM context hints need it to re-apply explicit
+     * sub-agent reasoning choices over the user's model-instance defaults.
+     */
+    subAgentChatConfigOverride?: Partial<LobeAgentChatConfig>;
+  };
 
 interface AgentWelcomeData {
   openQuestions: string[];
@@ -171,6 +179,29 @@ export class AgentService {
     }
 
     return normalizedConfig;
+  }
+
+  /**
+   * The model and provider a run of this agent actually uses: the same
+   * `DEFAULT_AGENT_CONFIG` → server default → user default → agent layering
+   * as {@link getAgentConfig}, narrowed to those two fields. For read paths
+   * that only need to know which model will answer (deriving what media a
+   * share visitor may attach, for instance) without loading the agent's
+   * knowledge and documents.
+   */
+  async resolveModelSelection(agent: {
+    model?: string | null;
+    provider?: string | null;
+  }): Promise<{ model: string; provider: string }> {
+    const defaultAgentConfig = await this.userModel.getUserSettingsDefaultAgentConfig();
+    const merged = this.mergeDefaultConfig(
+      { model: agent.model, provider: agent.provider },
+      defaultAgentConfig,
+    )!;
+
+    // `LobeAgentConfig` types both as optional even though `DEFAULT_AGENT_CONFIG`
+    // always supplies them; the fallbacks are those same constants.
+    return { model: merged.model ?? DEFAULT_MODEL, provider: merged.provider ?? DEFAULT_PROVIDER };
   }
 
   /**

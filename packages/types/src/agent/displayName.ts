@@ -45,20 +45,38 @@ export function agentDisplayName(
 }
 
 /**
- * Resolve the supporting label shown beside an agent's primary name.
+ * Resolve the supporting label shown beside an agent's primary name: its role.
  *
- * Runtime-backed agents can supply `preferredLabel` (for example "Hermes")
- * because their persisted title may instead contain an internal platform
- * profile name such as "default". Regular agents show their role only when a
- * personal name is present. A label matching the primary name is suppressed.
+ * Only an agent with a personal name has one — an agent without a name already
+ * renders its title as the primary label, so repeating it would be noise. This
+ * is deliberately uniform across every kind of agent, including runtime-backed
+ * (heterogeneous) ones: they show their own role rather than their runtime.
+ *
+ * A role the primary label already spells out is suppressed for the same
+ * reason: a heterogeneous agent defaults to "Max 的 Kimi Code", and tagging it
+ * "Kimi Code" again says nothing. Rename it to something that no longer echoes
+ * the role and the tag comes back.
+ *
+ * "Spells out" means the role is the name's whole suffix behind a word
+ * boundary — the shape the generated "{owner} 的 {product}" / "{owner}'s
+ * {product}" default produces. A name that merely contains the role as a
+ * substring ("Arthur" / "Art", "MozArt" / "Art") keeps its tag: that overlap
+ * is coincidence, not repetition.
  */
 export const agentSecondaryDisplayName = (
   agent: AgentNameFields | null | undefined,
-  preferredLabel?: string | null,
 ): string | undefined => {
-  const primaryLabel = agentDisplayName(agent);
-  const role = firstNonBlank(agent?.name) ? agent?.title : undefined;
-  const secondaryLabel = firstNonBlank(preferredLabel, role);
+  const role = firstNonBlank(agent?.name) ? firstNonBlank(agent?.title) : undefined;
+  if (!role) return undefined;
 
-  return secondaryLabel === primaryLabel ? undefined : secondaryLabel;
+  const primary = agentDisplayName(agent);
+  if (!primary) return role;
+  if (primary === role) return undefined;
+
+  if (primary.endsWith(role)) {
+    const boundary = primary[primary.length - role.length - 1];
+    if (!/[\p{L}\p{N}]/u.test(boundary)) return undefined;
+  }
+
+  return role;
 };

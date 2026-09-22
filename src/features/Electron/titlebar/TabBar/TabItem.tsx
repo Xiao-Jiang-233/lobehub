@@ -1,24 +1,20 @@
 'use client';
 
 import { useSortable } from '@dnd-kit/sortable';
-import {
-  ActionIcon,
-  Avatar,
-  ContextMenuTrigger,
-  type GenericItemType,
-  Icon,
-  Tooltip,
-} from '@lobehub/ui';
+import { ContextMenuTrigger, type GenericItemType, Icon, Tooltip } from '@lobehub/ui';
+import { ActionIcon } from '@lobehub/ui/base-ui';
 import { cx } from 'antd-style';
 import { X } from 'lucide-react';
 import { useMotionValue, useSpring, useTransform } from 'motion/react';
 import * as m from 'motion/react-m';
-import { memo, useCallback, useEffect, useRef } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import Avatar from '@/components/Avatar';
 import { electronStylish } from '@/styles/electron';
 
 import { type ResolvedTab } from './hooks/useResolvedTabs';
+import { useTabPreview } from './hooks/useTabPreview';
 import { useTabRunning } from './hooks/useTabRunning';
 import { useTabUnread } from './hooks/useTabUnread';
 import { TAB_SPRING } from './motion';
@@ -42,17 +38,22 @@ interface TabItemProps {
    * neighbours are still shrinking into place, so the two would overlap by a full tab
    * width and take the whole settle to pull apart.
    */
+  enterWidth: number;
   enterX: number;
   index: number;
   isActive: boolean;
+  isSplitVisible: boolean;
   item: ResolvedTab;
   onActivate: (id: string, url: string) => void;
   onClose: (id: string) => void;
   onCloseLeft: (id: string) => void;
   onCloseOthers: (id: string) => void;
   onCloseRight: (id: string) => void;
+  onCloseSplitView: () => void;
+  onOpenInSplitView: (id: string) => void;
   onTogglePin: (id: string) => void;
   pinnedCount: number;
+  splitViewEnabled: boolean;
   tier: TabTier;
   totalCount: number;
   width: number;
@@ -63,18 +64,23 @@ const TabItem = memo<TabItemProps>(
   ({
     item,
     isActive,
+    isSplitVisible,
     index,
     pinnedCount,
+    splitViewEnabled,
     tier,
     totalCount,
     width,
     x,
+    enterWidth,
     enterX,
     onActivate,
     onClose,
     onCloseOthers,
     onCloseLeft,
     onCloseRight,
+    onCloseSplitView,
+    onOpenInSplitView,
     onTogglePin,
   }) => {
     const styles = useStyles;
@@ -98,7 +104,7 @@ const TabItem = memo<TabItemProps>(
 
     // A newly opened tab springs out from zero rather than popping in at full width; the
     // motion value starts collapsed and is set to the real width on mount.
-    const targetWidth = useMotionValue(0);
+    const targetWidth = useMotionValue(enterWidth);
     const springWidth = useSpring(targetWidth, TAB_SPRING);
     const targetX = useMotionValue(enterX);
     const springX = useSpring(targetX, TAB_SPRING);
@@ -136,10 +142,10 @@ const TabItem = memo<TabItemProps>(
     }, [x, isSorting, targetX, springX]);
 
     const handleClick = useCallback(() => {
-      if (!isActive) {
+      if (!isActive || isSplitVisible) {
         onActivate(id, tab.url);
       }
-    }, [isActive, onActivate, id, tab.url]);
+    }, [isActive, isSplitVisible, onActivate, id, tab.url]);
 
     const handleClose = useCallback(
       (e: React.MouseEvent) => {
@@ -163,13 +169,17 @@ const TabItem = memo<TabItemProps>(
         buildTabContextMenuItems({
           id,
           index,
+          inSplitView: isSplitVisible,
           onClose,
           onCloseLeft,
           onCloseOthers,
           onCloseRight,
+          onCloseSplitView,
+          onOpenInSplitView,
           onTogglePin,
           pinned,
           pinnedCount,
+          splitViewEnabled,
           t,
           totalCount,
         }),
@@ -180,13 +190,20 @@ const TabItem = memo<TabItemProps>(
         totalCount,
         pinned,
         pinnedCount,
+        splitViewEnabled,
+        isSplitVisible,
         onClose,
         onCloseOthers,
         onCloseLeft,
         onCloseRight,
+        onCloseSplitView,
+        onOpenInSplitView,
         onTogglePin,
       ],
     );
+
+    const [hovered, setHovered] = useState(false);
+    const preview = useTabPreview(id, hovered);
 
     const indicator = (
       <span className={styles.avatarWrapper}>
@@ -195,6 +212,7 @@ const TabItem = memo<TabItemProps>(
             emojiScaleWithBackground
             avatar={meta.avatar}
             background={meta.backgroundColor}
+            name={meta.title}
             shape="square"
             size={16}
           />
@@ -215,6 +233,7 @@ const TabItem = memo<TabItemProps>(
           electronStylish.nodrag,
           styles.tab,
           pinned && styles.tabPinned,
+          isSplitVisible && !isActive && styles.tabSplitVisible,
           isActive && styles.tabActive,
           isDragging && styles.tabDragging,
         )}
@@ -230,6 +249,8 @@ const TabItem = memo<TabItemProps>(
         }}
         onAuxClick={handleAuxClick}
         onClick={handleClick}
+        onPointerEnter={() => setHovered(true)}
+        onPointerLeave={() => setHovered(false)}
         {...attributes}
         {...listeners}
       >
@@ -259,7 +280,19 @@ const TabItem = memo<TabItemProps>(
     // pop a blank bubble on hover.
     return (
       <ContextMenuTrigger items={contextMenuItems}>
-        <Tooltip disabled={tier === 'full'} title={meta.title}>
+        <Tooltip
+          disabled={tier === 'full' && !preview}
+          title={
+            preview ? (
+              <span className={styles.previewCard}>
+                <img alt={meta.title} className={styles.previewImage} src={preview} />
+                <span className={styles.previewTitle}>{meta.title}</span>
+              </span>
+            ) : (
+              meta.title
+            )
+          }
+        >
           {face}
         </Tooltip>
       </ContextMenuTrigger>

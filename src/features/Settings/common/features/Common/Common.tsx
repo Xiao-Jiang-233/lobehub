@@ -1,8 +1,8 @@
 'use client';
 
 import { type FormGroupItemType } from '@lobehub/ui';
-import { Flexbox, Form, Icon, ImageSelect, Skeleton } from '@lobehub/ui';
-import { Select, Tabs } from '@lobehub/ui/base-ui';
+import { Flexbox, Form, Icon, ImageSelect } from '@lobehub/ui';
+import { Select, Skeleton, Tabs } from '@lobehub/ui/base-ui';
 import isEqual from 'fast-deep-equal';
 import { Ban, Gauge, Monitor, Moon, Mouse, Sun, Waves } from 'lucide-react';
 import { useTheme as useNextThemesTheme } from 'next-themes';
@@ -21,6 +21,7 @@ import { systemStatusSelectors } from '@/store/global/selectors';
 import { useUserStore } from '@/store/user';
 import { settingsSelectors } from '@/store/user/selectors';
 import { type LocaleMode } from '@/types/locale';
+import { preloadLang } from '@/utils/client/preloadLang';
 
 const Common = memo(() => {
   const { t } = useTranslation('setting');
@@ -39,8 +40,7 @@ const Common = memo(() => {
     switchLocale(value);
   };
 
-  if (!(isStatusInit && isUserStateInit))
-    return <Skeleton active paragraph={{ rows: 5 }} title={false} />;
+  if (!(isStatusInit && isUserStateInit)) return <Skeleton.Text rows={5} />;
 
   const themeFormGroup: FormGroupItemType = {
     children: [
@@ -86,6 +86,19 @@ const Common = memo(() => {
           <Flexbox horizontal justify={'flex-end'}>
             <Select
               defaultValue={language}
+              optionRender={(option) => (
+                <span
+                  style={{
+                    flex: 1,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                  onMouseEnter={() => preloadLang(option.value as LocaleMode)}
+                >
+                  {option.label}
+                </span>
+              )}
               options={[
                 { label: t('settingCommon.lang.autoMode'), value: 'auto' },
                 ...localeOptions,

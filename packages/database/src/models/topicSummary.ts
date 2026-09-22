@@ -21,6 +21,7 @@ import {
 
 import { messages, topics, userSettings } from '../schemas';
 import type { LobeChatDatabase } from '../type';
+import { notShareVisitorTopic } from '../utils/shareVisitor';
 
 export interface TopicSummaryCandidateCursor {
   id: string;
@@ -42,7 +43,9 @@ export interface TopicSummaryCandidate {
   workspaceId: string | null;
 }
 
-const isTopicAutoSummaryEnabled = sql<boolean>`COALESCE((${userSettings.systemAgent}->'topicAutoSummary'->>'enabled')::boolean, true) = true`;
+// Mirrors `DEFAULT_TOPIC_AUTO_SUMMARY_SYSTEM_AGENT_ITEM.enabled`: users who have
+// never touched the setting are opted out, so the missing-value default is false.
+const isTopicAutoSummaryEnabled = sql<boolean>`COALESCE((${userSettings.systemAgent}->'topicAutoSummary'->>'enabled')::boolean, false) = true`;
 const SYSTEM_TOPIC_TRIGGERS = ['cron', 'eval', 'task_manager', 'task', 'document'];
 
 export const topicSummaryEligibleMessage = and(
@@ -94,6 +97,11 @@ export class TopicSummaryModel {
           topicSummaryEligibleMessage,
           or(isNull(topics.trigger), not(inArray(topics.trigger, SYSTEM_TOPIC_TRIGGERS))),
           or(isNull(topics.status), notInArray(topics.status, ['running', 'scheduled'])),
+          // Visitor topics are creator-billed only through the share spend
+          // gate; the auto-summary worker must never pick them, or a shared
+          // agent's visitor turn would silently spend the creator's balance
+          // outside the gate. See `notShareVisitorTopic` for the invariant.
+          notShareVisitorTopic(),
           force ? undefined : isTopicAutoSummaryEnabled,
         ),
       )
@@ -158,7 +166,18 @@ export class TopicSummaryModel {
         metadata: mergeAutoSummaryMetadata(marker),
         updatedAt: new Date(),
       })
-      .where(and(eq(topics.id, input.topicId), exists(snapshotMessage), notExists(newerMessage)))
+      .where(
+        and(
+          eq(topics.id, input.topicId),
+          // Defense in depth against a visitor topic slipping past the
+          // listCandidates filter and the service-layer guard (see
+          // `notShareVisitorTopic`): the write fence itself refuses to touch
+          // a share-visitor topic keyed only by id.
+          notShareVisitorTopic(),
+          exists(snapshotMessage),
+          notExists(newerMessage),
+        ),
+      )
       .returning({ id: topics.id });
 
     return rows.length > 0;

@@ -1,7 +1,7 @@
 'use client';
 
-import { ActionIcon, Flexbox, Text } from '@lobehub/ui';
-import { Button, Switch, useModalContext } from '@lobehub/ui/base-ui';
+import { Flexbox } from '@lobehub/ui';
+import { ActionIcon, Button, Switch, Text, useModalContext } from '@lobehub/ui/base-ui';
 import { createStaticStyles } from 'antd-style';
 import { RotateCcw, XIcon } from 'lucide-react';
 import { memo } from 'react';
@@ -10,7 +10,7 @@ import { useTranslation } from 'react-i18next';
 import CountStepper from './components/CountStepper';
 import PresetBar from './components/PresetBar';
 import SettingRow from './components/SettingRow';
-import { HOME_COUNT_MAX, HOME_COUNT_MIN, HOME_WIDGET_KEYS } from './config';
+import { HOME_COUNT_MAX, HOME_COUNT_MIN, HOME_WIDGET_GROUPS } from './config';
 import { useHomeCustomization } from './useHomeCustomization';
 
 const styles = createStaticStyles(({ css, cssVar }) => ({
@@ -46,6 +46,7 @@ const CustomizeModalContent = memo(() => {
     taskCount,
     togglePortrait,
     toggleWidget,
+    usageActive,
   } = useHomeCustomization();
 
   return (
@@ -73,36 +74,46 @@ const CustomizeModalContent = memo(() => {
           <PresetBar value={preset} onChange={applyPreset} />
         </SettingRow>
 
-        <Flexbox gap={12}>
-          <Text fontSize={12} type={'secondary'} weight={600}>
-            {t('dashboard.customize.group.decoration')}
-          </Text>
-          <SettingRow
-            description={t('dashboard.customize.portrait.desc')}
-            title={t('dashboard.customize.portrait.title')}
-          >
-            <Switch
-              aria-label={t('dashboard.customize.portrait.title')}
-              checked={showPortrait}
-              onChange={togglePortrait}
-            />
-          </SettingRow>
-        </Flexbox>
+        {/* No heading: the groups below name parts of the page, and a heading
+            over this single row would promise a category that has one member
+            and no page to point at. Its own label and description say enough. */}
+        <SettingRow
+          description={t('dashboard.customize.portrait.desc')}
+          title={t('dashboard.customize.portrait.title')}
+        >
+          <Switch
+            aria-label={t('dashboard.customize.portrait.title')}
+            checked={showPortrait}
+            size={'small'}
+            onChange={togglePortrait}
+          />
+        </SettingRow>
 
-        <Flexbox gap={12}>
-          <Text fontSize={12} type={'secondary'} weight={600}>
-            {t('dashboard.customize.group.sections')}
-          </Text>
-          {HOME_WIDGET_KEYS.map((key) => (
-            <SettingRow key={key} title={t(`dashboard.customize.widget.${key}`)}>
-              <Switch
-                aria-label={t(`dashboard.customize.widget.${key}`)}
-                checked={!isWidgetHidden(key)}
-                onChange={() => toggleWidget(key)}
-              />
-            </SettingRow>
-          ))}
-        </Flexbox>
+        {HOME_WIDGET_GROUPS.map((group) => (
+          <Flexbox gap={12} key={group.key}>
+            <Text fontSize={12} type={'secondary'} weight={600}>
+              {t(`dashboard.customize.group.${group.key}`)}
+            </Text>
+            {/* The usage widget is a business slot: a deployment without it
+                must not show a switch that toggles nothing. */}
+            {group.widgets
+              .filter((key) => key !== 'usage' || usageActive)
+              .map((key) => (
+                <SettingRow key={key} title={t(`dashboard.customize.widget.${key}`)}>
+                  <Switch
+                    aria-label={t(`dashboard.customize.widget.${key}`)}
+                    checked={!isWidgetHidden(key)}
+                    // The scheduled block is the second half of the task overview,
+                    // so there is nothing for it to switch on while the first half
+                    // is off.
+                    disabled={key === 'scheduledTasks' && isWidgetHidden('tasks')}
+                    size={'small'}
+                    onChange={() => toggleWidget(key)}
+                  />
+                </SettingRow>
+              ))}
+          </Flexbox>
+        ))}
 
         <Flexbox gap={12}>
           <Text fontSize={12} type={'secondary'} weight={600}>

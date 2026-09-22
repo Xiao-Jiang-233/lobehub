@@ -1,5 +1,6 @@
 import { useCallback } from 'react';
 
+import { useHomeUsageWidgetActive } from '@/business/client/features/HomeUsageWidget';
 import { useGlobalStore } from '@/store/global';
 import { systemStatusSelectors } from '@/store/global/selectors';
 
@@ -11,6 +12,7 @@ import {
   type HomePresetKey,
   type HomeWidgetKey,
   isHomeMinimalLayout,
+  isHomeWidgetHidden,
   resolveHomePreset,
 } from './config';
 
@@ -33,16 +35,20 @@ interface HomeCustomization {
   taskCount: number;
   togglePortrait: () => void;
   toggleWidget: (key: HomeWidgetKey) => void;
+  /** Whether the business usage widget exists here — gates its switch. */
+  usageActive: boolean;
 }
 
 export const useHomeMinimalLayout = (): boolean => {
   const hiddenWidgets = useGlobalStore(systemStatusSelectors.hiddenHomeWidgets);
   const showPortrait = useGlobalStore(systemStatusSelectors.showHomePortrait);
+  const usageActive = useHomeUsageWidgetActive();
 
-  return isHomeMinimalLayout({ hiddenWidgets, showPortrait });
+  return isHomeMinimalLayout({ hiddenWidgets, showPortrait }, usageActive);
 };
 
 export const useHomeCustomization = (): HomeCustomization => {
+  const usageActive = useHomeUsageWidgetActive();
   const hiddenWidgets = useGlobalStore(systemStatusSelectors.hiddenHomeWidgets);
   const recentsCount = useGlobalStore(systemStatusSelectors.homeRecentsCount);
   const taskCount = useGlobalStore(systemStatusSelectors.homeTaskCount);
@@ -99,7 +105,7 @@ export const useHomeCustomization = (): HomeCustomization => {
   }, [updateSystemStatus]);
 
   const isWidgetHidden = useCallback(
-    (key: HomeWidgetKey) => hiddenWidgets.includes(key),
+    (key: HomeWidgetKey) => isHomeWidgetHidden(key, hiddenWidgets),
     [hiddenWidgets],
   );
 
@@ -107,7 +113,7 @@ export const useHomeCustomization = (): HomeCustomization => {
     applyPreset,
     hiddenWidgets,
     isWidgetHidden,
-    preset: resolveHomePreset({ hiddenWidgets, showPortrait }),
+    preset: resolveHomePreset({ hiddenWidgets, showPortrait }, usageActive),
     recentsCount,
     reset,
     setRecentsCount,
@@ -116,5 +122,6 @@ export const useHomeCustomization = (): HomeCustomization => {
     taskCount,
     toggleWidget,
     togglePortrait,
+    usageActive,
   };
 };

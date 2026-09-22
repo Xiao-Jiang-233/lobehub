@@ -1,10 +1,11 @@
 import { createElement } from 'react';
 
-import Loading from '@/components/Loading/BrandTextLoading';
+import SettingsProfileSkeleton from '@/components/Skeleton/Settings/Profile';
+import SettingsSectionSkeleton from '@/components/Skeleton/Settings/Section';
 import dynamic from '@/libs/next/dynamic';
 import { SettingsTabs } from '@/store/global/initialState';
 
-const loading = (debugId: string) => () => createElement(Loading, { debugId });
+const loading = (_debugId: string) => () => createElement(SettingsSectionSkeleton);
 
 export const componentMap = {
   [SettingsTabs.Advanced]: dynamic(() => import('../advanced'), {
@@ -27,6 +28,9 @@ export const componentMap = {
   }),
   [SettingsTabs.Messenger]: dynamic(() => import('../messenger'), {
     loading: loading('Settings > Messenger'),
+  }),
+  [SettingsTabs.Integrations]: dynamic(() => import('../integrations'), {
+    loading: loading('Settings > Integrations'),
   }),
   [SettingsTabs.Notification]: dynamic(
     () => import('@/business/client/BusinessSettingPages/Notification'),
@@ -57,7 +61,7 @@ export const componentMap = {
   }),
   // Profile related tabs
   [SettingsTabs.Profile]: dynamic(() => import('../profile'), {
-    loading: loading('Settings > Profile'),
+    loading: () => createElement(SettingsProfileSkeleton),
   }),
   [SettingsTabs.Stats]: dynamic(() => import('../stats'), {
     loading: loading('Settings > Stats'),

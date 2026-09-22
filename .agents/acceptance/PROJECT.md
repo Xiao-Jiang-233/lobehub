@@ -1,12 +1,29 @@
-# PROJECT.md — agent-testing adapter for LobeHub
+# PROJECT.md — acceptance adapter for LobeHub
 
-This is the LobeHub adapter for the generic `agent-testing` skill. The skill is
-project-agnostic; every LobeHub-specific command, port, service, and probe lives
-here. The skill reads this file — it never guesses LobeHub's commands.
+This file is the **commands** layer of LobeHub's acceptance setup: every
+LobeHub-specific command, port, service, surface, and probe. The `acceptance`
+skill reads it — it never guesses LobeHub's commands.
 
-Scripts referenced below live under `.agents/acceptance/scripts/`. The generic skill
-and its own scripts (`report-init.sh`, `cdp-screenshot.sh`, `record-gif.sh`,
-`check-screen-recording.sh`, …) are installed at `.agents/skills/agent-testing/`.
+Its two siblings:
+
+- [`PROCESS.md`](./PROCESS.md) — the run process (plan gate, execution rules,
+  publishing, teardown).
+- `.agents/skills/acceptance/` — the portable skill: what a check, evidence,
+  report, and round are. This is a committed, generated snapshot of
+  [`lobehub/acceptance`](https://github.com/lobehub/acceptance), the only maintenance
+  source. Update it from the repository's current default branch with
+  `bun apps/cli/src/index.ts acceptance update --json`, then review and commit the
+  downloaded files. The JSON records the exact source commit; publishing a tag
+  or release is not required. Do not hand-edit this installed copy.
+  `.claude/skills` shares `.agents/skills`.
+
+Project helpers (`report-init.sh`, `record-gif.sh`, `capture-app-window.sh`, …)
+live under `.agents/acceptance/scripts/`. Generic CDP capture and screen-recording
+preflight live only under `.agents/skills/acceptance/scripts/`; invoke their shell
+scripts with `bash`. See the installed skill's
+[`screenshot-helpers.md`](../skills/acceptance/references/screenshot-helpers.md)
+for commands, prerequisites, and exit codes. Do not copy these implementations
+into the project layer.
 
 ## 1. Project summary
 
@@ -18,8 +35,8 @@ Electron desktop shell, and a CLI (`lh`). Repo layout that matters for testing:
 - `apps/cli/` — the `lh` CLI; runs from source (`bun src/index.ts`), no rebuild.
   **Standalone install** (see §6).
 - `packages/**`, `e2e`, `apps/server` — covered by the root pnpm workspace.
-- `src/` — the SPA and shared web app; `src/server/` holds agent-hono /
-  workflows-hono.
+- `src/` — the SPA and shared web app; `apps/server/src/router-hono/` holds the
+  Hono endpoint routers and standalone runtime.
 
 **The root pnpm workspace does NOT cover `apps/desktop` or `apps/cli`.**
 `pnpm-workspace.yaml` lists `packages/**`, `e2e`, `apps/server`, and only
@@ -108,8 +125,11 @@ stale standalone install: a recently added workspace package fails to resolve �
   `DATABASE_URL=postgresql://postgres:postgres@localhost:5433/postgres`,
   `DATABASE_DRIVER=node`, `AGENT_RUNTIME_MODE=queue`,
   `REDIS_URL=redis://localhost:6380`, `FEATURE_FLAGS=-agent_self_iteration`,
-  `KEY_VAULTS_SECRET`, `AUTH_SECRET`, auth verification off, plus local `s3rver`
-  and local QStash vars. Treat the dev-server terminal output as final when the
+  `KEY_VAULTS_SECRET`, `AUTH_SECRET`, auth verification off, a generated
+  `JWKS_KEY` (persisted at `.records/env/agent-testing-jwks.json`, required by every
+  async-task dispatch such as image generation), `SSRF_ALLOW_PRIVATE_IP_ADDRESS=1`
+  (the server fetches reference images from the local s3rver on 127.0.0.1), plus
+  local `s3rver` and local QStash vars. Treat the dev-server terminal output as final when the
   port is non-standard, then `export SERVER_URL=http://localhost:<port>`.
 
   In the cloud repo (this repo as the `lobehub/` submodule), worktree names map
@@ -241,6 +261,16 @@ stale standalone install: a recently added workspace package fails to resolve �
   `agent-browser --session s<port> --cdp <port>`. Pool design, the collision
   matrix, and the login-copy recipe: `.agents/acceptance/references/multi-instance.md`.
 
+### Heterogeneous-agent compatibility (project skill)
+
+The live official-provider model matrix belongs to the
+`testing-heterogeneous-agents` project skill
+(`.agents/skills/testing-heterogeneous-agents/`). It extends Acceptance with the
+matrix semantics and harness while reusing the Electron environment, auth, and
+CDP commands above. It is manual-only: the user must explicitly invoke
+`/testing-heterogeneous-agents` in Claude Code or `$testing-heterogeneous-agents`
+in Codex. Do not automatically load or run it during other acceptance tasks.
+
 ### Bot channels (project skill)
 
 Bot-channel surfaces (Discord / Slack / Telegram / WeChat / Lark / QQ / iMessage)
@@ -278,7 +308,9 @@ Routes worth jumping to:
 | `/`                          | Home (has a chat input)           |
 | `/agent/<agentId>`           | Agent conversation (latest topic) |
 | `/agent/<agentId>/<topicId>` | Specific topic in a conversation  |
-| `/task` · `/task/<taskId>`   | Task list / task detail           |
+| `/tasks`                     | Task list                         |
+| `/task`                      | Task assistant                    |
+| `/task/<taskId>`             | Task detail                       |
 | `/page`                      | Documents (文稿)                  |
 | `/settings`                  | Settings                          |
 | `/community`                 | Discover / community              |
@@ -331,7 +363,7 @@ in `.agents/acceptance/references/agent-gateway.md`.
 - **OS-capture surfaces are macOS-only** (bot channels, `capture-app-window.sh`,
   osascript screenshots): they come out black without Screen Recording (TCC)
   permission or when the display is asleep/locked. CDP-based evidence
-  (`agent-browser screenshot`, the installed skill's `cdp-screenshot.sh`) is
+  (`agent-browser screenshot`, `bash .agents/skills/acceptance/scripts/cdp-screenshot.sh`) is
   unaffected. Electron runs on Linux/cloud only under `xvfb-run`, and there OS
   capture does not work — prefer CDP evidence for cloud-portable runs.
 

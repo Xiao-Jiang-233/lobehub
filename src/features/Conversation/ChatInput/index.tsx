@@ -1,8 +1,10 @@
 'use client';
 
+import { type VoiceMessageRecording } from '@lobechat/types';
 import { type SlashOptions } from '@lobehub/editor';
 import { type ChatInputActionsProps } from '@lobehub/editor/react';
-import { Alert, Flexbox, type MenuProps } from '@lobehub/ui';
+import { Flexbox, type MenuProps } from '@lobehub/ui';
+import { Alert } from '@lobehub/ui/base-ui';
 import { type ReactNode } from 'react';
 import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -36,8 +38,10 @@ import {
 } from '../store';
 import TodoProgress from '../TodoProgress';
 import InputCompletionErrorAlert from './InputCompletionErrorAlert';
+import LinkedGoalTray from './LinkedGoalTray';
 import OpStatusTray from './OpStatusTray';
 import QueueTray from './QueueTray';
+import { sendVoiceMessage } from './sendVoiceMessage';
 import {
   getContextWindowMessages,
   getConversationChatInputUiState,
@@ -46,6 +50,7 @@ import {
 import GoalArmedChip from './VerifyTray/GoalArmedChip';
 import { useGoalArmStore } from './VerifyTray/goalArmStore';
 import GoalTray from './VerifyTray/GoalTray';
+import { canSendVoiceMessage, useCanSendVoiceMessage } from './voiceMessageCapability';
 
 /** Max recent messages to feed into auto-complete context (≈10 conversation turns) */
 const MAX_CONTEXT_MESSAGES = 25;
@@ -119,6 +124,15 @@ export interface ChatInputProps {
    */
   mentionItems?: SlashOptions['items'];
   /**
+   * Blocking notices (device offline, cloud not configured, …). They ride at the
+   * top of the composer's floating stack — above the run-status / queue / todo
+   * trays, which stay next to the input they annotate, and on the same inline
+   * edges as those trays so the stack reads as one column. Rendered as a sibling
+   * above `ChatInput` instead, a notice would be covered by those trays, since
+   * the stack floats upward from the top of this column.
+   */
+  notices?: ReactNode;
+  /**
    * Callback when editor instance is ready
    */
   onEditorReady?: (editor: any) => void;
@@ -170,6 +184,7 @@ const ChatInput = memo<ChatInputProps>(
     extraActionItems,
     isConfigLoading = false,
     mentionItems,
+    notices,
     controlBarSlot,
     sendMenu,
     sendAreaPrefix,
@@ -185,12 +200,21 @@ const ChatInput = memo<ChatInputProps>(
     const dbMessages = useConversationStore(dataSelectors.dbMessages);
     const context = useConversationStore((s) => s.context);
     const contextKey = useMemo(() => messageMapKey(context), [context]);
-    const [agentId, inputMessage, sendMessage, stopGenerating] = useConversationStore((s) => [
-      s.context.agentId,
-      s.inputMessage,
-      s.sendMessage,
-      s.stopGenerating,
-    ]);
+    const canRecordVoiceMessage = useCanSendVoiceMessage(context);
+    // The composer's controls must resolve their topic from THIS conversation,
+    // not the global `activeTopicId`: a page copilot embedded next to another
+    // chat runs with `topicId: null` while the outer chat's topic is still the
+    // global one (see PageAgentProvider). `null` is meaningful — it means "this
+    // conversation has no topic" — so it is passed through as-is.
+    const [agentId, topicId, inputMessage, sendMessage, stopGenerating] = useConversationStore(
+      (s) => [
+        s.context.agentId,
+        s.context.topicId ?? null,
+        s.inputMessage,
+        s.sendMessage,
+        s.stopGenerating,
+      ],
+    );
     const [enableHistoryCount, historyCount] = useAgentStore((s) => [
       chatConfigByIdSelectors.getEnableHistoryCountById(agentId || '')(s),
       chatConfigByIdSelectors.getHistoryCountById(agentId || '')(s),
@@ -275,7 +299,7 @@ const ChatInput = memo<ChatInputProps>(
     );
 
     // Pre-topic "armed goal" state (topic Goal lab). `armedAt` is only ever set
-    // by the lab-gated "+" → Set goal entry, so its presence already implies the
+    // by the lab-gated "+" → Goal entry, so its presence already implies the
     // lab is on. While armed the goal chip rides the action bar and the composer
     // placeholder prompts for the goal (the next message becomes it).
     const goalArmedAt = useGoalArmStore((s) => (agentId ? s.armedAt[agentId] : undefined));
@@ -293,6 +317,33 @@ const ChatInput = memo<ChatInputProps>(
     // disableSend hard-blocks regardless of content (host surface is read-only).
     const disabled =
       isInputEmpty || isUploadingFiles || (!!disableQueue && isInputQueueBlocked) || !!disableSend;
+
+    // `disabled` above lags the editor: `inputMessage` mirrors content through
+    // the editor's debounced onChange, so a fast type→Enter arrives while the
+    // mirror still reads empty and the send would be silently dropped. Gate
+    // Enter/click on live state instead — handleSend re-validates all of these
+    // at trigger time, so this only mirrors the visual disabled semantics.
+    const customDisabled = customSendButtonProps?.disabled;
+    const resolveSendBlocked = useCallback(() => {
+      if (disableSend) return true;
+      if (customDisabled !== undefined) return customDisabled;
+
+      const fileStore = useFileStore.getState();
+      if (fileChatSelectors.isUploadingFiles(fileStore)) return true;
+
+      const { context: liveContext, editor } = storeApi.getState();
+      if (
+        disableQueue &&
+        operationSelectors.isInputLoadingByContext(liveContext)(useChatStore.getState())
+      )
+        return true;
+
+      const hasText = String(editor?.getMarkdownContent?.() || '').trim().length > 0;
+      const hasFiles = fileChatSelectors.chatUploadFileList(fileStore).length > 0;
+      const hasContextSelections =
+        fileChatSelectors.chatContextSelections(messageMapKey(liveContext))(fileStore).length > 0;
+      return !hasText && !hasFiles && !hasContextSelections;
+    }, [customDisabled, disableQueue, disableSend, storeApi]);
     const shouldUsePlainSendButton = !showSendMenu && !!sendMenu;
     const businessAlerts = useBusinessChatInputAlerts();
     const businessSendAreaPrefix = getBusinessChatInputSendAreaPrefix(sendAreaPrefix);
@@ -375,6 +426,29 @@ const ChatInput = memo<ChatInputProps>(
         : undefined),
     };
 
+    const handleVoiceMessageSend = useCallback(
+      (recording: VoiceMessageRecording) => {
+        if (operationSelectors.isInputVisiblyLoadingByContext(context)(useChatStore.getState())) {
+          return false;
+        }
+
+        return Boolean(
+          useChatStore.getState().sendVoiceMessage({
+            canSend: canSendVoiceMessage,
+            context,
+            recording,
+            send: (file, { context: targetContext, messageId, signal }) =>
+              sendVoiceMessage(sendMessage, file, {
+                context: targetContext,
+                optimisticUserMessageId: messageId,
+                signal,
+              }),
+          }),
+        );
+      },
+      [context, sendMessage],
+    );
+
     const defaultContent = (
       <WideScreenContainer
         style={{ position: 'relative', ...(skipScrollMarginWithList ? { marginTop: -12 } : null) }}
@@ -405,11 +479,19 @@ const ChatInput = memo<ChatInputProps>(
               zIndex: 10,
             }}
           >
+            {/* A blocking notice outranks the run it is blocking, so it heads the
+                stack. It takes the overlay's own inset like every tray below it,
+                so the whole floating column shares one pair of edges. */}
+            {notices}
             <InputCompletionErrorAlert />
             {!disableQueue && hasQueuedMessages && <QueueTray />}
             <TodoProgress topAttached={!disableQueue && hasQueuedMessages} />
             <OpStatusTray topAttached={(!disableQueue && hasQueuedMessages) || hasTodos} />
             <GoalTray
+              topAttached={(!disableQueue && hasQueuedMessages) || hasTodos || hasOpStatus}
+            />
+            {/* Goals this conversation planned; sits last so it rides flush on the input. */}
+            <LinkedGoalTray
               topAttached={(!disableQueue && hasQueuedMessages) || hasTodos || hasOpStatus}
             />
           </Flexbox>
@@ -442,6 +524,7 @@ const ChatInput = memo<ChatInputProps>(
       <ChatInputProvider
         agentId={agentId}
         allowExpand={allowExpand}
+        canRecordVoiceMessage={canRecordVoiceMessage}
         contextSelectionKey={contextKey}
         contextWindowMessages={contextWindowMessages}
         draftKey={contextKey}
@@ -449,10 +532,12 @@ const ChatInput = memo<ChatInputProps>(
         getMessages={getMessages}
         leftActions={leftActions}
         mentionItems={mentionItems}
+        resolveSendBlocked={resolveSendBlocked}
         rightActions={rightActions}
         sendButtonProps={sendButtonProps}
         sendMenu={showSendMenu ? sendMenu : undefined}
         slashPlacement="top"
+        topicId={topicId}
         chatInputEditorRef={(instance) => {
           if (instance) {
             setEditor(instance);
@@ -461,6 +546,7 @@ const ChatInput = memo<ChatInputProps>(
         }}
         onMarkdownContentChange={updateInputMessage}
         onSend={handleSend}
+        onVoiceMessageSend={handleVoiceMessageSend}
       >
         {children ?? defaultContent}
       </ChatInputProvider>

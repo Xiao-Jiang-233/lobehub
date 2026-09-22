@@ -14,12 +14,14 @@ import {
 } from '@/features/AgentTransferMigration';
 import ChatMiniMap from '@/features/ChatMiniMap';
 import { ChatList, ConversationProvider } from '@/features/Conversation';
+import { useMessageDeepLink } from '@/features/Conversation/ChatList/hooks/useMessageDeepLink';
 import ComposerDraftReceiver from '@/features/Conversation/ComposerDraftReceiver';
 import { useChatFollowUp } from '@/features/Conversation/hooks/useChatFollowUp';
 import {
   ForwardMessageDispatcher,
   MessageForwardFooter,
 } from '@/features/Conversation/MessageForward';
+import SplitDropZone from '@/features/Conversation/SplitDropZone';
 import { useAgentContext } from '@/features/Conversation/useAgentContext';
 import { mergeConversationHooks } from '@/features/Conversation/utils/mergeConversationHooks';
 import { useGatewayReconnect } from '@/hooks/useGatewayReconnect';
@@ -64,13 +66,11 @@ const styles = createStaticStyles(({ css }) => ({
 const Conversation = memo(() => {
   const { t } = useTranslation('chat');
   const context = useAgentContext();
+  const messageDeepLink = useMessageDeepLink();
 
   // Get raw dbMessages from ChatStore for this context
   // ConversationStore will parse them internally to generate displayMessages
-  const chatKey = useMemo(
-    () => messageMapKey(context),
-    [context.agentId, context.topicId, context.threadId],
-  );
+  const chatKey = messageMapKey(context);
   const replaceMessages = useChatStore((s) => s.replaceMessages);
   const messages = useChatStore((s) => s.dbMessagesMap[chatKey]);
 
@@ -99,7 +99,7 @@ const Conversation = memo(() => {
       ? topicSelectors.getTopicById(context.topicId)(s)?.metadata?.runningOperation
       : undefined,
   );
-  useGatewayReconnect(context.topicId, runningOperation);
+  useGatewayReconnect(context.topicId, runningOperation, context.agentId);
 
   // While the topic is parked as `scheduled`, pull the cron dispatch into the
   // store when `runAt` passes — nothing pushes it, and the reconnect above
@@ -119,7 +119,10 @@ const Conversation = memo(() => {
   // of an empty (not-yet-migrated) history, and blocks sending — the server
   // could not assemble the missing context anyway. Opening it jumps it to the
   // front of the backfill queue, so the wait is typically a few seconds.
-  const { topicPending } = useTopicMigrationPending(context.agentId, context.topicId);
+  const { job: migrationJob, topicPending } = useTopicMigrationPending(
+    { agentId: context.agentId },
+    context.topicId,
+  );
 
   const hooks = useMemo(
     () => mergeConversationHooks(businessAnalyticsHooks, chatFollowUpHooks),
@@ -138,46 +141,48 @@ const Conversation = memo(() => {
         replaceMessages(messages, { context: ctx, source: meta?.source });
       }}
     >
-      <Flexbox
-        flex={1}
-        width={'100%'}
-        style={{
-          overflowX: 'hidden',
-          overflowY: 'auto',
-          position: 'relative',
-        }}
-      >
-        {topicPending ? (
-          <TopicMigrationPlaceholder agentId={context.agentId} topicId={context.topicId} />
-        ) : (
-          <ChatList
-            defaultWorkflowExpandLevel={isHeterogeneousAgent ? { streaming: 'full' } : undefined}
-            headerSlot={<div aria-hidden className={styles.floatingHeaderSpacer} />}
-            welcome={<AgentHome />}
-            footerSlot={
-              isSubagentThread ? (
-                <Flexbox
-                  horizontal
-                  align={'center'}
-                  justify={'center'}
-                  paddingBlock={6}
-                  paddingInline={16}
-                >
-                  <span
-                    style={{
-                      color: cssVar.colorTextDescription,
-                      fontSize: 12,
-                      textAlign: 'center',
-                    }}
+      <SplitDropZone>
+        <Flexbox
+          flex={1}
+          width={'100%'}
+          style={{
+            overflowX: 'hidden',
+            overflowY: 'auto',
+            position: 'relative',
+          }}
+        >
+          {topicPending ? (
+            <TopicMigrationPlaceholder agentId={context.agentId} topicId={context.topicId} />
+          ) : (
+            <ChatList
+              headerSlot={<div aria-hidden className={styles.floatingHeaderSpacer} />}
+              messageDeepLink={messageDeepLink}
+              welcome={<AgentHome />}
+              footerSlot={
+                isSubagentThread ? (
+                  <Flexbox
+                    horizontal
+                    align={'center'}
+                    justify={'center'}
+                    paddingBlock={6}
+                    paddingInline={16}
                   >
-                    {t('thread.subagentReadOnlyHint')}
-                  </span>
-                </Flexbox>
-              ) : undefined
-            }
-          />
-        )}
-      </Flexbox>
+                    <span
+                      style={{
+                        color: cssVar.colorTextDescription,
+                        fontSize: 12,
+                        textAlign: 'center',
+                      }}
+                    >
+                      {t('thread.subagentReadOnlyHint')}
+                    </span>
+                  </Flexbox>
+                ) : undefined
+              }
+            />
+          )}
+        </Flexbox>
+      </SplitDropZone>
       {!isSubagentThread && !topicPending && (
         <MessageForwardFooter>
           {isHeterogeneousAgent ? <HeterogeneousChatInput /> : <MainChatInput />}
@@ -186,7 +191,11 @@ const Conversation = memo(() => {
       {topicPending && (
         <Flexbox horizontal align={'center'} justify={'center'} paddingBlock={6} paddingInline={16}>
           <span style={{ color: cssVar.colorTextDescription, fontSize: 12, textAlign: 'center' }}>
-            {t('transferMigration.inputDisabledHint')}
+            {t(
+              migrationJob?.type === 'copy'
+                ? 'transferMigration.inputDisabledHintCopy'
+                : 'transferMigration.inputDisabledHint',
+            )}
           </span>
         </Flexbox>
       )}
@@ -195,9 +204,15 @@ const Conversation = memo(() => {
       <ThreadHydration />
       <ChatMiniMap />
       <ForwardMessageDispatcher />
-      <Suspense>
-        <MessageFromUrl />
-      </Suspense>
+      {/* Held back while the topic is still migrating: the composer above is
+          already disabled, and letting `?message=` through would send into the
+          not-yet-migrated history this screen is waiting for. The param stays
+          in the URL, so the send fires once the backfill lands. */}
+      {!topicPending && (
+        <Suspense>
+          <MessageFromUrl />
+        </Suspense>
+      )}
     </ConversationProvider>
   );
 });

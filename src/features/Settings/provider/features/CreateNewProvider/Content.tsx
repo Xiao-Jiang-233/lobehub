@@ -1,12 +1,13 @@
 'use client';
 
-import { ProviderIcon } from '@lobehub/icons';
-import { Flexbox, Input, InputPassword, Text, TextArea } from '@lobehub/ui';
-import { Button, Select, toast, useModalContext } from '@lobehub/ui/base-ui';
+import { Flexbox, Input, InputPassword, TextArea } from '@lobehub/ui';
+import { Button, Select, Text, toast, useModalContext } from '@lobehub/ui/base-ui';
 import { Form } from 'antd';
+import { AiProviderBaseURLSchema } from 'model-bank/aiProvider';
 import { memo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
+import { ProviderIcon } from '@/components/LobeIcons';
 import { useWorkspaceAwareNavigate } from '@/features/Workspace/useWorkspaceAwareNavigate';
 import { useAiInfraStore } from '@/store/aiInfra/store';
 import { type CreateAiProviderParams } from '@/types/aiProvider';
@@ -149,8 +150,16 @@ const CreateNewProviderContent = memo(() => {
         <Form.Item
           label={t('createNewAiProvider.proxyUrl.title')}
           name={[KeyVaultsConfigKey, LLMProviderBaseUrlKey]}
-          rules={[{ message: t('createNewAiProvider.proxyUrl.required'), required: true }]}
           style={itemStyle}
+          rules={[
+            { message: t('createNewAiProvider.proxyUrl.required'), required: true },
+            {
+              validator: (_, value: string) =>
+                !value || AiProviderBaseURLSchema.safeParse(value).success
+                  ? Promise.resolve()
+                  : Promise.reject(t('providerModels.config.baseURL.invalid')),
+            },
+          ]}
         >
           <Input
             allowClear

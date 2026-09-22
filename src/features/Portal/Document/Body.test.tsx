@@ -1,8 +1,13 @@
 import { act, fireEvent, render, screen } from '@testing-library/react';
-import { type ReactNode } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import DocumentBody from './Body';
+
+vi.mock('@/features/FileViewer/FileDocumentPreview', () => ({
+  FileDocumentPreview: ({ fileId }: { fileId?: string | null }) => (
+    <div data-file-id={fileId} data-testid="original-file-preview" />
+  ),
+}));
 
 vi.mock('antd-style', async (importOriginal) => {
   const actual = (await importOriginal()) as Record<string, unknown>;
@@ -20,20 +25,6 @@ vi.mock('antd-style', async (importOriginal) => {
     },
   };
 });
-
-vi.mock('react-i18next', () => ({
-  useTranslation: () => ({
-    t: (key: string) => key,
-  }),
-}));
-
-vi.mock('@lobehub/ui', () => ({
-  ActionIcon: () => null,
-  Button: ({ children }: { children: ReactNode }) => <button>{children}</button>,
-  Flexbox: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  Text: ({ children }: { children: ReactNode }) => <span>{children}</span>,
-  TextArea: () => <textarea />,
-}));
 
 vi.mock('@/components/CodeEditorPane', () => ({
   default: ({
@@ -62,6 +53,8 @@ vi.mock('@/components/CodeEditorPane', () => ({
 const mockDocumentMeta = vi.hoisted(() => ({
   current: { content: '', filename: 'doc.md' } as {
     content?: string;
+    fileId?: string | null;
+    sourceType?: string;
     fileType?: string | null;
     filename?: string | null;
     title?: string | null;
@@ -156,6 +149,21 @@ vi.mock('@/store/document', () => ({
 }));
 
 describe('DocumentBody', () => {
+  /** @example A file-backed document previews its upload and retains document chat. */
+  it('shows the original upload without mounting either editor', () => {
+    // ROOT CAUSE:
+    // File-backed documents used the empty content field as an editable document.
+    // Selecting a file preview must not mount an editor that could save this empty copy.
+    mockDocumentMeta.current = { content: '', fileId: 'file-original', filename: 'source.unknown' };
+    render(<DocumentBody />);
+    /** @example The original file id reaches the read-only preview. */
+    expect(screen.getByTestId('original-file-preview').dataset.fileId).toBe('file-original');
+    /** @example Neither editor mounts, while document chat stays available. */
+    expect(screen.queryByTestId('highlight-editor')).toBeNull();
+    expect(screen.queryByTestId('editor-canvas')).toBeNull();
+    expect(screen.getByTestId('floating-chat-panel')).toBeTruthy();
+  });
+
   beforeEach(() => {
     mockAgentState.current.activeAgentId = 'agent-1';
     mockChatState.current.portalStack[0].agentDocumentId = 'agent-document-1';

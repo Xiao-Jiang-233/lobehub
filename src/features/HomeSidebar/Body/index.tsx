@@ -1,7 +1,8 @@
 'use client';
 
 import type { MenuProps } from '@lobehub/ui';
-import { Accordion, ActionIcon, DropdownMenu, Flexbox, Icon } from '@lobehub/ui';
+import { DropdownMenu, Flexbox, Icon } from '@lobehub/ui';
+import { AccordionRoot, ActionIcon } from '@lobehub/ui/base-ui';
 import { EyeOffIcon, MoreHorizontalIcon, SlidersHorizontalIcon } from 'lucide-react';
 import type { Key, ReactElement } from 'react';
 import { memo, useCallback, useMemo } from 'react';
@@ -20,11 +21,13 @@ import { useGlobalStore } from '@/store/global';
 import { systemStatusSelectors } from '@/store/global/selectors';
 import { SIDEBAR_SPACER_ID } from '@/store/global/selectors/systemStatus';
 import { useUserStore } from '@/store/user';
+import { labPreferSelectors } from '@/store/user/selectors';
 import { isModifierClick } from '@/utils/navigation';
 
 import Agent from './Agent';
 import { openCustomizeSidebarModal } from './CustomizeSidebarModal';
 import Private from './Private';
+import Project from './Project';
 import { useSyncWorkspaceSidebarPreference } from './useSyncWorkspaceSidebarPreference';
 
 export enum GroupKey {
@@ -37,7 +40,12 @@ export enum GroupKey {
   Resource = 'resource',
 }
 
-const ACCORDION_KEYS = new Set<string>([GroupKey.Recents, GroupKey.Agent, GroupKey.Private]);
+const ACCORDION_KEYS = new Set<string>([
+  GroupKey.Project,
+  GroupKey.Recents,
+  GroupKey.Agent,
+  GroupKey.Private,
+]);
 
 /** Keys rendered in the header — must be excluded from the body to avoid duplicates
  * when migrating users whose persisted sidebarItems still include them. */
@@ -46,6 +54,7 @@ const HEADER_KEYS = new Set<string>(['home', 'search']);
 const accordionComponents: Record<string, (key: string) => ReactElement> = {
   [GroupKey.Agent]: (key) => <Agent itemKey={key} key={key} />,
   [GroupKey.Private]: (key) => <Private itemKey={key} key={key} />,
+  [GroupKey.Project]: (key) => <Project itemKey={key} key={key} />,
   [GroupKey.Recents]: (key) => <Recents itemKey={key} key={key} />,
 };
 
@@ -78,6 +87,7 @@ const Body = memo(() => {
   // and the section layout syncs per-member — both live in the workspace
   // user preference, so load it alongside the sidebar.
   const useFetchWorkspaceUserPreference = useUserStore((s) => s.useFetchWorkspaceUserPreference);
+  const enableProjects = useUserStore(labPreferSelectors.enableProjects);
   useFetchWorkspaceUserPreference();
   useSyncWorkspaceSidebarPreference(activeWorkspaceId);
   const sidebarItems = useGlobalStore(systemStatusSelectors.sidebarItems(activeWorkspaceId));
@@ -135,9 +145,10 @@ const Body = memo(() => {
       // implicitly owner-private, so a dedicated bucket would be a noisy
       // empty section.
       if (k === GroupKey.Private && !activeWorkspaceId) return false;
+      if (k === GroupKey.Project && !enableProjects) return false;
       return k === GroupKey.Agent || k === SIDEBAR_SPACER_ID || !hiddenSections.includes(k);
     },
-    [hiddenSections, activeWorkspaceId],
+    [hiddenSections, activeWorkspaceId, enableProjects],
   );
 
   const visibleKeys = useMemo(
@@ -165,7 +176,7 @@ const Body = memo(() => {
             icon={navItem.icon}
             title={navItem.title}
             actions={
-              <DropdownMenu items={getContextMenuItems(key)} nativeButton={false}>
+              <DropdownMenu items={getContextMenuItems(key)}>
                 <ActionIcon icon={MoreHorizontalIcon} size={'small'} style={{ flex: 'none' }} />
               </DropdownMenu>
             }
@@ -201,14 +212,15 @@ const Body = memo(() => {
         const accordionKeys = accGroup.map((item) => item.key);
 
         elements.push(
-          <Accordion
-            expandedKeys={sidebarExpandedKeys}
-            gap={8}
+          <AccordionRoot
+            indicatorPlacement="inline"
             key={`acc-${elements.length}`}
-            onExpandedChange={(keys) => handleAccordionExpandedChange(accordionKeys, keys)}
+            style={{ gap: 8 }}
+            value={sidebarExpandedKeys}
+            onValueChange={(keys) => handleAccordionExpandedChange(accordionKeys, keys as string[])}
           >
             {accGroup.map((item) => item.element)}
-          </Accordion>,
+          </AccordionRoot>,
         );
         accGroup = [];
       }

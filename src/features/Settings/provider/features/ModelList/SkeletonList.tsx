@@ -1,6 +1,7 @@
 'use client';
 
-import { Flexbox, Skeleton } from '@lobehub/ui';
+import { Flexbox } from '@lobehub/ui';
+import { Skeleton } from '@lobehub/ui/base-ui';
 import { createStaticStyles } from 'antd-style';
 import { memo } from 'react';
 
@@ -41,40 +42,17 @@ export const Placeholder = memo(() => {
   return (
     <Flexbox horizontal className={styles.container}>
       <Flexbox horizontal className={styles.leftContent}>
-        <Skeleton.Avatar active shape="square" size={32} style={{ flex: 'none' }} />
+        <Skeleton.Avatar shape="square" size={32} style={{ flex: 'none' }} />
         <Flexbox className={styles.textContent}>
-          <Skeleton.Button
-            active
-            size={'small'}
-            style={{
-              height: 18,
-              width: 160,
-            }}
-          />
+          <Skeleton height={18} width={160} />
           <Flexbox horizontal gap={4}>
-            <Skeleton.Button
-              active
-              size={'small'}
-              style={{
-                height: 16,
-                width: 60,
-              }}
-            />
-            <Skeleton.Button
-              active
-              size={'small'}
-              style={{
-                height: 16,
-                width: 40,
-              }}
-            />
+            <Skeleton height={16} width={60} />
+            <Skeleton height={16} width={40} />
           </Flexbox>
         </Flexbox>
       </Flexbox>
       <Flexbox horizontal className={styles.rightContent}>
-        <Skeleton.Button
-          active
-          size={'small'}
+        <Skeleton
           style={{
             borderRadius: 12,
             height: 22,
@@ -86,12 +64,12 @@ export const Placeholder = memo(() => {
   );
 });
 
-export const SkeletonList = memo(() => (
+export const SkeletonList = () => (
   <Flexbox gap={4} paddingBlock={12}>
     {Array.from({ length: 6 }).map((_, i) => (
       <Placeholder key={i} />
     ))}
   </Flexbox>
-));
+);
 
 export default SkeletonList;

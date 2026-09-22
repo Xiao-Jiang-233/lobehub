@@ -3,10 +3,13 @@ import { RequestTrigger } from '@lobechat/types';
 import { describe, expect, it } from 'vitest';
 
 import {
+  canExecutionTargetReadLocalPaths,
   type ExecutionPlan,
+  executionPlanToManifestExecutionEnv,
   executionTargetToRuntimeMode,
   isDeviceLockedPlan,
   isHeterogeneousSandboxExecutionAvailable,
+  isLocalSandboxEnabled,
   resolveExecutionPlan,
   resolveExecutionTarget,
   resolveRuntimeMode,
@@ -16,6 +19,22 @@ import {
 const cfg = (over: Partial<LobeAgentAgencyConfig> = {}): LobeAgentAgencyConfig => ({ ...over });
 const ampCfg = (over: Partial<LobeAgentAgencyConfig> = {}): LobeAgentAgencyConfig => ({
   heterogeneousProvider: { command: 'amp', type: 'amp' },
+  ...over,
+});
+const codeBuddyCfg = (over: Partial<LobeAgentAgencyConfig> = {}): LobeAgentAgencyConfig => ({
+  heterogeneousProvider: { command: 'codebuddy', type: 'codebuddy' },
+  ...over,
+});
+const cursorCfg = (over: Partial<LobeAgentAgencyConfig> = {}): LobeAgentAgencyConfig => ({
+  heterogeneousProvider: { command: 'agent', type: 'cursor' },
+  ...over,
+});
+const droidCfg = (over: Partial<LobeAgentAgencyConfig> = {}): LobeAgentAgencyConfig => ({
+  heterogeneousProvider: { command: 'droid', type: 'droid' },
+  ...over,
+});
+const kimiCodeCfg = (over: Partial<LobeAgentAgencyConfig> = {}): LobeAgentAgencyConfig => ({
+  heterogeneousProvider: { command: 'kimi', type: 'kimi-code' },
   ...over,
 });
 const openCodeCfg = (over: Partial<LobeAgentAgencyConfig> = {}): LobeAgentAgencyConfig => ({
@@ -41,8 +60,15 @@ describe('isHeterogeneousSandboxExecutionAvailable', () => {
     expect(isHeterogeneousSandboxExecutionAvailable('hermes')).toBe(false);
   });
 
-  it('keeps Qoder on local or connected devices', () => {
+  it('keeps local-only CLIs on local or connected devices', () => {
+    expect(isHeterogeneousSandboxExecutionAvailable('droid')).toBe(false);
+    expect(isHeterogeneousSandboxExecutionAvailable('devin')).toBe(false);
     expect(isHeterogeneousSandboxExecutionAvailable('qoder')).toBe(false);
+    expect(isHeterogeneousSandboxExecutionAvailable('trae')).toBe(false);
+  });
+
+  it('keeps Cursor on local or connected devices', () => {
+    expect(isHeterogeneousSandboxExecutionAvailable('cursor')).toBe(false);
   });
 });
 
@@ -182,6 +208,10 @@ describe('resolveExecutionTarget', () => {
   describe('hetero providers without sandbox execution', () => {
     it.each([
       ['Amp', ampCfg],
+      ['CodeBuddy', codeBuddyCfg],
+      ['Cursor', cursorCfg],
+      ['Droid', droidCfg],
+      ['Kimi Code', kimiCodeCfg],
       ['OpenCode', openCodeCfg],
       ['Pi', piCfg],
       ['Qoder', qoderCfg],
@@ -206,6 +236,17 @@ describe('resolveExecutionTarget', () => {
       for (const executionTarget of ['sandbox', 'local'] as const) {
         expect(
           resolveExecutionTarget(ampCfg({ executionTarget }), {
+            clientExecutionAvailable: false,
+            isHetero: true,
+          }),
+        ).toBe('none');
+      }
+    });
+
+    it('normalizes unsupported Kimi Code sandbox and unbound web-local targets to pending', () => {
+      for (const executionTarget of ['sandbox', 'local'] as const) {
+        expect(
+          resolveExecutionTarget(kimiCodeCfg({ executionTarget }), {
             clientExecutionAvailable: false,
             isHetero: true,
           }),
@@ -393,6 +434,53 @@ describe('executionTargetToRuntimeMode', () => {
     expect(executionTargetToRuntimeMode('sandbox')).toBe('cloud');
     expect(executionTargetToRuntimeMode('device')).toBe('none');
     expect(executionTargetToRuntimeMode('none')).toBe('none');
+  });
+});
+
+describe('executionPlanToManifestExecutionEnv', () => {
+  it('preserves the image-capable desktop target only after it is routed', () => {
+    expect(
+      executionPlanToManifestExecutionEnv(
+        {
+          deviceId: 'desktop-device',
+          kind: 'device',
+          target: 'local',
+        },
+        'desktop-device',
+      ),
+    ).toBe('local');
+    expect(
+      executionPlanToManifestExecutionEnv({
+        kind: 'device-unrouted',
+        reason: 'no-online-device',
+        target: 'local',
+      }),
+    ).toBe('device-unrouted');
+  });
+
+  it('does not advertise desktop capabilities when a local target routes elsewhere', () => {
+    const plan: ExecutionPlan = {
+      deviceId: 'remote-cli-device',
+      kind: 'device',
+      target: 'local',
+    };
+
+    expect(executionPlanToManifestExecutionEnv(plan, 'desktop-device')).toBe('device');
+    expect(executionPlanToManifestExecutionEnv(plan)).toBe('device');
+  });
+
+  it('keeps non-local plan kinds unchanged', () => {
+    expect(
+      executionPlanToManifestExecutionEnv({
+        deviceId: 'remote-device',
+        kind: 'device',
+        target: 'device',
+      }),
+    ).toBe('device');
+    expect(executionPlanToManifestExecutionEnv({ kind: 'sandbox', target: 'sandbox' })).toBe(
+      'sandbox',
+    );
+    expect(executionPlanToManifestExecutionEnv({ kind: 'none', target: 'none' })).toBe('none');
   });
 });
 
@@ -1019,6 +1107,60 @@ describe('resolveExecutionPlan', () => {
     });
   });
 
+  // Agent Share visitors: `canUseDevice` is always false and the creator may
+  // have granted `lobe-cloud-sandbox` — the grant is honoured via the sandbox
+  // instead of being dropped with `none`.
+  describe('sandboxFallback — device-denied runs resolve to the sandbox', () => {
+    it('sends a denied device-capable target to the sandbox', () => {
+      for (const executionTarget of ['local', 'device', 'auto'] as const) {
+        expect(
+          resolveExecutionPlan({
+            agencyConfig: cfg({ boundDeviceId: 'device-a', executionTarget }),
+            canUseDevice: false,
+            clientExecutionAvailable: true,
+            onlineDeviceIds: ['device-a'],
+            sandboxFallback: true,
+          }),
+        ).toEqual({ kind: 'sandbox', target: 'sandbox' });
+      }
+    });
+
+    it('is a no-op without the flag — the denied run still degrades to none', () => {
+      expect(
+        resolveExecutionPlan({
+          agencyConfig: cfg({ executionTarget: 'local' }),
+          canUseDevice: false,
+          clientExecutionAvailable: true,
+          sandboxFallback: false,
+        }),
+      ).toEqual({ kind: 'none', target: 'none' });
+    });
+
+    it('never overrides chat mode — chat means no tools, not no device', () => {
+      expect(
+        resolveExecutionPlan({
+          agencyConfig: cfg({ executionTarget: 'local' }),
+          canUseDevice: false,
+          chatConfig: { enableAgentMode: false },
+          clientExecutionAvailable: true,
+          sandboxFallback: true,
+        }),
+      ).toEqual({ kind: 'none', target: 'none' });
+    });
+
+    it('does not resurrect device routing when the device is allowed', () => {
+      expect(
+        resolveExecutionPlan({
+          agencyConfig: cfg({ boundDeviceId: 'device-a', executionTarget: 'device' }),
+          canUseDevice: true,
+          clientExecutionAvailable: true,
+          onlineDeviceIds: ['device-a'],
+          sandboxFallback: true,
+        }),
+      ).toEqual({ deviceId: 'device-a', kind: 'device', target: 'device' });
+    });
+  });
+
   describe('onlineDeviceIds=undefined — hetero dispatch semantics', () => {
     it('trusts the binding without online checks and never auto-activates', () => {
       expect(
@@ -1062,6 +1204,7 @@ describe('resolveExecutionPlan', () => {
 
     it.each([
       ['Amp', ampCfg],
+      ['Cursor', cursorCfg],
       ['OpenCode', openCodeCfg],
     ] as const)(
       'keeps %s non-device targets pending instead of constructing a sandbox plan',
@@ -1121,5 +1264,71 @@ describe('isDeviceLockedPlan', () => {
     ).toBe(false);
     expect(isDeviceLockedPlan({ kind: 'none', target: 'none' })).toBe(false);
     expect(isDeviceLockedPlan({ kind: 'sandbox', target: 'sandbox' })).toBe(false);
+  });
+});
+
+describe('isLocalSandboxEnabled', () => {
+  it('fences a local run that opted in', () => {
+    expect(
+      isLocalSandboxEnabled(cfg({ executionTarget: 'local', localSandbox: true }), 'local'),
+    ).toBe(true);
+  });
+
+  it('leaves an opted-out local run alone', () => {
+    expect(isLocalSandboxEnabled(cfg({ executionTarget: 'local' }), 'local')).toBe(false);
+    expect(
+      isLocalSandboxEnabled(cfg({ executionTarget: 'local', localSandbox: false }), 'local'),
+    ).toBe(false);
+  });
+
+  it('ignores the flag once the run resolved somewhere other than local', () => {
+    // A stored `localSandbox` survives a switch to Cloud Sandbox (so switching
+    // back restores it), and web/bot coercions move a `local` target to
+    // `sandbox` / `device` / `auto`. None of those runs touch the desktop
+    // sandbox, so claiming they are fenced would be a lie about a security
+    // guarantee.
+    const config = cfg({ executionTarget: 'local', localSandbox: true });
+
+    expect(isLocalSandboxEnabled(config, 'sandbox')).toBe(false);
+    expect(isLocalSandboxEnabled(config, 'device')).toBe(false);
+    expect(isLocalSandboxEnabled(config, 'auto')).toBe(false);
+    expect(isLocalSandboxEnabled(config, 'none')).toBe(false);
+  });
+
+  it('treats a missing config as unfenced', () => {
+    expect(isLocalSandboxEnabled(undefined, 'local')).toBe(false);
+  });
+});
+
+describe('canExecutionTargetReadLocalPaths', () => {
+  it('local runs read this machine directly', () => {
+    expect(canExecutionTargetReadLocalPaths('local', cfg(), 'device-1')).toBe(true);
+    expect(canExecutionTargetReadLocalPaths('local', undefined, undefined)).toBe(true);
+  });
+
+  it('a device run bound to THIS machine reads local paths', () => {
+    expect(
+      canExecutionTargetReadLocalPaths('device', cfg({ boundDeviceId: 'device-1' }), 'device-1'),
+    ).toBe(true);
+  });
+
+  it('a device run bound to ANOTHER machine cannot read paths dragged from here', () => {
+    expect(
+      canExecutionTargetReadLocalPaths('device', cfg({ boundDeviceId: 'device-2' }), 'device-1'),
+    ).toBe(false);
+  });
+
+  it('an unbound device run or unknown current device stays off', () => {
+    expect(canExecutionTargetReadLocalPaths('device', cfg(), 'device-1')).toBe(false);
+    expect(
+      canExecutionTargetReadLocalPaths('device', cfg({ boundDeviceId: 'device-1' }), undefined),
+    ).toBe(false);
+  });
+
+  it('sandbox / auto / none never read the user filesystem', () => {
+    const config = cfg({ boundDeviceId: 'device-1' });
+    expect(canExecutionTargetReadLocalPaths('sandbox', config, 'device-1')).toBe(false);
+    expect(canExecutionTargetReadLocalPaths('auto', config, 'device-1')).toBe(false);
+    expect(canExecutionTargetReadLocalPaths('none', config, 'device-1')).toBe(false);
   });
 });

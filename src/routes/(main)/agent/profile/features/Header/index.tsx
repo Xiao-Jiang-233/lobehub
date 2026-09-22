@@ -1,18 +1,18 @@
 import { isDesktop } from '@lobechat/const';
 import { getActivePluginIds, type LobeAgentConfig } from '@lobechat/types';
-import { ActionIcon, DropdownMenu, Flexbox, Icon } from '@lobehub/ui';
-import { confirmModal, type ModalInstance } from '@lobehub/ui/base-ui';
-import { toast } from '@lobehub/ui/base-ui';
+import { DropdownMenu, Flexbox, Icon } from '@lobehub/ui';
+import { ActionIcon, confirmModal, type ModalInstance, toast } from '@lobehub/ui/base-ui';
 import { cssVar } from 'antd-style';
 import isEqual from 'fast-deep-equal';
 import type { TFunction } from 'i18next';
 import {
-  BarChart3,
   BotMessageSquareIcon,
   Download,
   MoreHorizontal,
   Settings2Icon,
+  Share2Icon,
   Trash,
+  UploadCloud,
   UserRound,
   UsersIcon,
 } from 'lucide-react';
@@ -20,11 +20,15 @@ import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import { useAgentTransferMenuItem } from '@/business/client/hooks/useAgentTransferMenuItem';
+import { useAgentTransferToMemberMenuItem } from '@/business/client/hooks/useAgentTransferToMemberMenuItem';
 import { useAuthorInfo } from '@/business/client/hooks/useAuthorInfo';
 import { useBusinessAgentImportMenuItem } from '@/business/client/hooks/useBusinessAgentImportMenuItem';
 import { useHasActiveWorkspace } from '@/business/client/hooks/useHasActiveWorkspace';
+import { useAgentShareSupported } from '@/business/client/useAgentShareSupported';
 import { DESKTOP_HEADER_ICON_SMALL_SIZE } from '@/const/layoutTokens';
 import AgentBreadcrumb from '@/features/AgentBreadcrumb';
+import { useAgentMarketSubmission } from '@/features/AgentMarketSubmission/useAgentMarketSubmission';
+import AgentProfileTabs, { AGENT_PROFILE_TABS_CENTER_STYLE } from '@/features/AgentProfileTabs';
 import NavHeader from '@/features/NavHeader';
 import { formatPageEditorInfoTime } from '@/features/PageEditor/formatPageEditorInfoTime';
 import AccessLevelTag from '@/features/ResourcePermission/AccessLevelTag';
@@ -37,16 +41,16 @@ import { agentSelectors, builtinAgentSelectors } from '@/store/agent/selectors';
 import { useGlobalStore } from '@/store/global';
 import { systemStatusSelectors } from '@/store/global/selectors';
 import { useHomeStore } from '@/store/home';
+import { getDeleteErrorMessageKey } from '@/utils/forbiddenError';
 import { sanitizeFileName } from '@/utils/sanitizeFileName';
 
 import { openAgentSettingsModal } from '../AgentSettings';
 import { selectors as profileSelectors, useProfileStore } from '../store';
 import AgentForkTag from './AgentForkTag';
-import AgentStatusTag from './AgentStatusTag';
 import AgentVersionReviewTag from './AgentVersionReviewTag';
 
 type HeaderTranslation = TFunction<
-  readonly ['setting', 'chat', 'file', 'common', 'spend'],
+  readonly ['setting', 'chat', 'file', 'common', 'agent'],
   undefined
 >;
 
@@ -100,7 +104,7 @@ const buildAgentProfileMarkdown = (params: {
 };
 
 const Header = memo(() => {
-  const { i18n, t } = useTranslation(['setting', 'chat', 'file', 'common', 'spend']);
+  const { i18n, t } = useTranslation(['setting', 'chat', 'file', 'common', 'agent']);
   const dateLocale = i18n?.resolvedLanguage || i18n?.language;
   const navigate = useWorkspaceAwareNavigate();
 
@@ -162,7 +166,12 @@ const Header = memo(() => {
     confirmModal({
       okButtonProps: { danger: true },
       onOk: async () => {
-        await removeAgent(activeAgentId);
+        try {
+          await removeAgent(activeAgentId);
+        } catch (error) {
+          toast.error(t(getDeleteErrorMessageKey(error), { ns: 'common' }));
+          return;
+        }
         toast.success(t('confirmRemoveSessionSuccess', { ns: 'chat' }));
         navigate('/');
       },
@@ -230,6 +239,8 @@ const Header = memo(() => {
 
   const importMenuItem = useBusinessAgentImportMenuItem(activeAgentId ?? undefined);
   const transferMenuItems = useAgentTransferMenuItem(activeAgentId ?? undefined, meta);
+  // Ownership handover to a workspace member — separate from the scope moves.
+  const transferToMemberItem = useAgentTransferToMemberMenuItem(activeAgentId ?? undefined, meta);
 
   const settingsModalRef = useRef<ModalInstance | null>(null);
   useEffect(
@@ -239,6 +250,29 @@ const Header = memo(() => {
     },
     [],
   );
+
+  const { visible: shareVisible } = useAgentShareSupported(activeAgentId);
+  const canShareAgent = shareVisible === true && canConfigure;
+
+  const showMarketSubmission = !!config && !isBuiltinAgent && !isHeterogeneous;
+  const canSubmitToMarket = showMarketSubmission && canManage && !lockedByOther && !lockPending;
+  const marketSubmission = useAgentMarketSubmission({
+    agentId: activeAgentId,
+    canSubmit: canSubmitToMarket,
+    getPrompt: () => ({
+      editorData: editor
+        ? (editor.getDocument('json') as LobeAgentConfig['editorData'])
+        : config?.editorData,
+      systemRole: editor ? (editor.getDocument('markdown') as unknown as string) : systemRole,
+    }),
+  });
+
+  // Share settings are a sibling tab of the profile group, not a popup — the
+  // shortcut just jumps to that tab.
+  const handleOpenShare = useCallback(() => {
+    if (!activeAgentId) return;
+    navigate(`/agent/${activeAgentId}/share`);
+  }, [activeAgentId, navigate]);
 
   const menuItems = useMemo(() => {
     const businessTransferMenuItems = transferMenuItems ?? [];
@@ -255,14 +289,6 @@ const Header = memo(() => {
           if (!canConfigure) return;
           settingsModalRef.current?.close();
           settingsModalRef.current = openAgentSettingsModal();
-        },
-      },
-      {
-        icon: <Icon icon={BarChart3} />,
-        key: 'usage-stats',
-        label: t('usageStats.entry', { ns: 'spend' }),
-        onClick: () => {
-          if (activeAgentId) navigate(`/agent/${activeAgentId}/statistics`);
         },
       },
       showPermissionPageEntry
@@ -282,6 +308,15 @@ const Header = memo(() => {
           }
         : null,
       { type: 'divider' as const },
+      showMarketSubmission
+        ? {
+            disabled: !canSubmitToMarket || marketSubmission.isSubmitting,
+            icon: <Icon icon={UploadCloud} />,
+            key: 'submit-to-market',
+            label: t('marketSubmission.entry'),
+            onClick: marketSubmission.open,
+          }
+        : null,
       {
         children: [
           {
@@ -296,8 +331,11 @@ const Header = memo(() => {
       },
       importMenuItem ? { type: 'divider' as const } : null,
       importMenuItem,
-      businessTransferMenuItems.length > 0 ? { type: 'divider' as const } : null,
+      businessTransferMenuItems.length > 0 || transferToMemberItem
+        ? { type: 'divider' as const }
+        : null,
       ...businessTransferMenuItems,
+      transferToMemberItem,
       canManage ? { type: 'divider' as const } : null,
       canManage
         ? {
@@ -340,27 +378,35 @@ const Header = memo(() => {
     authorName,
     canConfigure,
     canManage,
+    canSubmitToMarket,
     createdAt,
     dateLocale,
     handleExportMarkdown,
     handleDelete,
     isInbox,
+    marketSubmission.isSubmitting,
+    marketSubmission.open,
     navigate,
+    showMarketSubmission,
     showPermissionPageEntry,
     t,
     importMenuItem,
     transferMenuItems,
+    transferToMemberItem,
   ]);
 
   return (
+    // `relative` anchors the absolutely-centered switcher below.
     <NavHeader
+      style={{ position: 'relative' }}
       left={
         <Flexbox horizontal align={'center'} gap={8}>
-          {activeAgentId && (
-            <AgentBreadcrumb agentId={activeAgentId} title={t('tab.profile', { ns: 'chat' })} />
-          )}
-          <AgentStatusTag />
-          <AgentVersionReviewTag />
+          {/* No section title — the Segmented beside it names the current tab. */}
+          {activeAgentId && <AgentBreadcrumb agentId={activeAgentId} />}
+          <AgentVersionReviewTag
+            key={`review-${activeAgentId}-${marketSubmission.revision}`}
+            submitted={marketSubmission.isUnderReview}
+          />
           <AgentForkTag />
           <AccessLevelTag
             resourceId={showPermissionsEntry ? (activeAgentId ?? undefined) : undefined}
@@ -370,6 +416,15 @@ const Header = memo(() => {
       }
       right={
         <Flexbox horizontal align={'center'} gap={4}>
+          {canShareAgent && (
+            <ActionIcon
+              icon={Share2Icon}
+              size={DESKTOP_HEADER_ICON_SMALL_SIZE}
+              title={t('share.entry', { ns: 'agent' })}
+              tooltipProps={{ placement: 'bottom' }}
+              onClick={handleOpenShare}
+            />
+          )}
           <DropdownMenu items={menuItems}>
             <ActionIcon icon={MoreHorizontal} size={DESKTOP_HEADER_ICON_SMALL_SIZE} />
           </DropdownMenu>
@@ -384,11 +439,18 @@ const Header = memo(() => {
         </Flexbox>
       }
       styles={{
+        // Center the switcher on the *header* midpoint, not within the leftover
+        // flex track between the left/right slots — those slots differ in width,
+        // so flex centering leaves unequal gaps (it reads as space-between, not
+        // centered). Absolute + translateX(-50%) makes the two gaps equal.
+        center: AGENT_PROFILE_TABS_CENTER_STYLE,
         left: {
           paddingInlineStart: 8,
         },
       }}
-    />
+    >
+      {activeAgentId && <AgentProfileTabs active={'profile'} agentId={activeAgentId} />}
+    </NavHeader>
   );
 });
 

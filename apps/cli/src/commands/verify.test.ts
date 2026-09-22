@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -18,12 +18,14 @@ import {
   registerVerifyCommand,
   reportEvidence,
   scenarioFromResult,
+  screenProgrammaticTestChecks,
   subjectFromEnv,
   subjectFromResult,
   surfacesFromResult,
   visualizationMetadata,
 } from './verify';
 import { registerAcceptanceCommands } from './verifyAcceptance';
+import { evidenceDescriptionForFile } from './verifyHelpers';
 
 const { mockTrpcClient } = vi.hoisted(() => ({
   mockTrpcClient: {
@@ -31,7 +33,6 @@ const { mockTrpcClient } = vi.hoisted(() => ({
       createRubric: { mutate: vi.fn() },
       deleteRun: { mutate: vi.fn() },
       getRubric: { query: vi.fn() },
-      getSkillBundle: { query: vi.fn() },
       updateRubric: { mutate: vi.fn() },
     },
   },
@@ -43,11 +44,6 @@ const { getTrpcClient: mockGetTrpcClient } = vi.hoisted(() => ({
 
 vi.mock('../api/client', () => ({ getTrpcClient: mockGetTrpcClient }));
 vi.mock('../settings', () => ({ resolveServerUrl: () => 'https://app.lobehub.com' }));
-vi.mock('../utils/logger', () => ({
-  log: { debug: vi.fn(), error: vi.fn(), info: vi.fn(), warn: vi.fn() },
-  setVerbose: vi.fn(),
-}));
-
 describe('verify rubric config commands', () => {
   let consoleSpy: ReturnType<typeof vi.spyOn>;
 
@@ -181,74 +177,6 @@ describe('verify evidence upload command', () => {
 
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(mockGetTrpcClient).not.toHaveBeenCalled();
-  });
-});
-
-describe('verify init command', () => {
-  let consoleSpy: ReturnType<typeof vi.spyOn>;
-  let dir: string;
-
-  beforeEach(() => {
-    consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    mockGetTrpcClient.mockResolvedValue(mockTrpcClient);
-    mockTrpcClient.verify.getSkillBundle.query.mockReset().mockResolvedValue({
-      content: '# Acceptance SKILL',
-      files: { 'references/plan-format.md': 'plan', 'surfaces/cli.md': 'cli' },
-      identifier: 'acceptance',
-      name: 'acceptance',
-    });
-    dir = mkdtempSync(path.join(tmpdir(), 'verify-init-'));
-  });
-
-  afterEach(() => {
-    consoleSpy.mockRestore();
-    rmSync(dir, { force: true, recursive: true });
-  });
-
-  const run = async (args: string[]) => {
-    const program = new Command();
-    program.exitOverride();
-    registerVerifyCommand(program);
-    await program.parseAsync(['node', 'lh', 'verify', ...args]);
-  };
-
-  it('defaults to the acceptance skill and writes it into .agents/skills/acceptance', async () => {
-    await run(['init', '--dir', dir]);
-
-    expect(mockTrpcClient.verify.getSkillBundle.query).toHaveBeenCalledWith({
-      identifier: 'acceptance',
-    });
-    const skillDir = path.join(dir, '.agents', 'skills', 'acceptance');
-    expect(readFileSync(path.join(skillDir, 'SKILL.md'), 'utf8')).toBe('# Acceptance SKILL');
-    expect(readFileSync(path.join(skillDir, 'references/plan-format.md'), 'utf8')).toBe('plan');
-    expect(readFileSync(path.join(skillDir, 'surfaces/cli.md'), 'utf8')).toBe('cli');
-  });
-
-  it('skips existing files without --force and overwrites with it', async () => {
-    const skillFile = path.join(dir, '.agents', 'skills', 'acceptance', 'SKILL.md');
-    await run(['init', '--dir', dir]);
-
-    // server now serves updated content
-    mockTrpcClient.verify.getSkillBundle.query.mockResolvedValue({
-      content: '# Updated SKILL',
-      files: {},
-      identifier: 'acceptance',
-      name: 'acceptance',
-    });
-
-    await run(['init', '--dir', dir]); // no --force → keep existing
-    expect(readFileSync(skillFile, 'utf8')).toBe('# Acceptance SKILL');
-
-    await run(['init', '--dir', dir, '--force']); // --force → overwrite
-    expect(readFileSync(skillFile, 'utf8')).toBe('# Updated SKILL');
-  });
-
-  it('reports the written/skipped counts as JSON', async () => {
-    await run(['init', '--dir', dir, '--json']);
-    const out = JSON.parse(consoleSpy.mock.calls.map((c) => String(c[0])).join(''));
-    expect(out.skill).toBe('acceptance');
-    expect(out.written).toContain('SKILL.md');
-    expect(existsSync(path.join(out.dir, 'SKILL.md'))).toBe(true);
   });
 });
 
@@ -473,6 +401,17 @@ describe('evidenceTypeForFile — markdown evidence', () => {
     expect(evidenceTypeForFile('assets/root-cause.txt')).toBe('text');
   });
 
+  it('types an audio clip as audio, not the binary-blob-as-text fallback', () => {
+    // Before `audio` existed these fell through to `text`, so a TTS deliverable
+    // published as an unreadable, unplayable artifact.
+    expect(evidenceTypeForFile('assets/tts-zh.mp3')).toBe('audio');
+    expect(evidenceTypeForFile('assets/reply.WAV')).toBe('audio');
+    expect(evidenceTypeForFile('assets/voice.m4a')).toBe('audio');
+    expect(evidenceTypeForFile('assets/tone.opus')).toBe('audio');
+    // .webm stays video — the container is overwhelmingly used for screen clips.
+    expect(evidenceTypeForFile('assets/flow.webm')).toBe('video');
+  });
+
   it('inlines a small markdown file as content instead of uploading it', () => {
     const dir = mkdtempSync(path.join(tmpdir(), 'lh-evidence-'));
     const file = path.join(dir, 'root-cause.md');
@@ -521,6 +460,71 @@ describe('surfacesFromResult — surface normalization', () => {
   it('returns undefined when the report names no surfaces at all', () => {
     expect(surfacesFromResult({})).toBeUndefined();
     expect(surfacesFromResult({ surfaces: [] })).toBeUndefined();
+  });
+});
+
+describe('screenProgrammaticTestChecks', () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it('drops the repo test suites and static gates, keeping real acceptance checks', () => {
+    const result = {
+      cases: [
+        { id: 'c1', name: '语音回复能在气泡里播放', status: 'pass' },
+        { id: 'c2', name: '单元测试全部通过', status: 'pass' },
+      ],
+      plan: [
+        { id: 'c1', title: '语音回复能在气泡里播放' },
+        { id: 'c2', title: '单元测试全部通过' },
+        { id: 'c3', method: 'bun run check --type', title: '类型检查无报错' },
+      ],
+    };
+
+    const { droppedIds, droppedLabels } = screenProgrammaticTestChecks(result);
+
+    expect([...droppedIds]).toEqual(['c2', 'c3']);
+    expect(droppedLabels).toEqual(['c2 — 单元测试全部通过', 'c3 — 类型检查无报错']);
+    expect(warnSpy).toHaveBeenCalled();
+  });
+
+  it('screens plan and cases together so a dropped item never orphans its pair', () => {
+    // The plan item names the gate; the case is titled loosely. Screening only
+    // one side would leave the other behind as an "unplanned" row.
+    const { droppedIds } = screenProgrammaticTestChecks({
+      cases: [{ id: 'c1', name: 'all green' }],
+      plan: [{ id: 'c1', title: 'vitest suite passes' }],
+    });
+
+    expect([...droppedIds]).toEqual(['c1']);
+  });
+
+  it('says nothing when the round has no programmatic-test checks', () => {
+    const { droppedIds, droppedLabels } = screenProgrammaticTestChecks({
+      plan: [{ id: '1', title: 'the reply streams token by token' }],
+    });
+
+    expect(droppedIds.size).toBe(0);
+    expect(droppedLabels).toEqual([]);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('omits the screened ids from the frozen plan', () => {
+    const result = {
+      plan: [
+        { id: 'c1', title: 'the reply streams token by token' },
+        { id: 'c2', title: 'unit tests pass' },
+      ],
+    };
+    const { droppedIds } = screenProgrammaticTestChecks(result);
+
+    expect(planFromResult(result, droppedIds)!.map((item) => item.id)).toEqual(['c1']);
   });
 });
 
@@ -665,6 +669,37 @@ describe('verify ingest-report — every run is an immutable acceptance round', 
     await program.parseAsync(['node', 'lh', 'verify', ...args]);
   };
 
+  it('keeps position-based fallback ids stable when screening drops an earlier case', async () => {
+    // Regression (codex review): the survivors used to be re-enumerated after
+    // the programmatic-test screen, so dropping an id-less first case shifted
+    // every later fallback id (`case-2` ingested as `case-1`) — orphaning the
+    // results from their plan items in the immutable round.
+    const verify = mockTrpcClient.verify as Record<string, any>;
+    verify.ingestResult = { mutate: vi.fn().mockResolvedValue({ id: 'result-1' }) };
+    writeFileSync(
+      path.join(dir, 'result.json'),
+      JSON.stringify({
+        cases: [
+          { name: '单元测试全部通过', status: 'pass' },
+          { name: '回复在气泡中渲染', status: 'pass' },
+          { name: '失败态可重试', status: 'pass' },
+        ],
+        plan: [
+          { id: 'case-2', title: '回复在气泡中渲染' },
+          { id: 'case-3', title: '失败态可重试' },
+        ],
+        title: 'fallback id screening',
+      }),
+    );
+
+    await run(['ingest-report', dir, '--json']);
+
+    const ingested = verify.ingestResult.mutate.mock.calls.map(
+      ([input]: [{ checkItemId: string }]) => input.checkItemId,
+    );
+    expect(ingested).toEqual(['case-2', 'case-3']);
+  });
+
   it('creates a fresh run and binds it to the current topic acceptance', async () => {
     const verify = mockTrpcClient.verify as Record<string, any>;
 
@@ -704,6 +739,41 @@ describe('verify ingest-report — every run is an immutable acceptance round', 
       acceptanceId: 'acceptance-1',
       verifyRunId: 'run-new',
     });
+  });
+
+  it('reuses the asset when the acceptance row is keyed by criterion rather than plan item', async () => {
+    mockTrpcClient.acceptance.getBundle.query.mockResolvedValue({
+      acceptance: {
+        id: 'acceptance-existing',
+        status: 'delivered',
+        subjectId: 'subject',
+        subjectType: 'standalone',
+      },
+      checks: [
+        { id: 'criterion-1', planItem: { id: 'stable-check', sourceCriterionId: 'criterion-1' } },
+      ],
+    });
+    writeFileSync(
+      path.join(dir, 'result.json'),
+      JSON.stringify({
+        cases: [{ id: 'stable-check', name: '输入区域可用', status: 'pass' }],
+        plan: [
+          {
+            id: 'stable-check',
+            title: '输入区域可用',
+            verifier: 'agent',
+            method: '打开输入区域',
+            expected: '可以输入',
+          },
+        ],
+      }),
+    );
+    await run(['ingest-report', dir, '--acceptance', 'acceptance-existing', '--json']);
+    expect(mockTrpcClient.verify.createRun.mutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        plan: [expect.objectContaining({ id: 'stable-check', sourceCriterionId: 'criterion-1' })],
+      }),
+    );
   });
 
   it('appends a re-verification round directly to an existing acceptance', async () => {
@@ -746,6 +816,102 @@ describe('verify ingest-report — every run is an immutable acceptance round', 
         context: expect.objectContaining({ question: 'How mature is X?', sourceCount: 8 }),
         scenario: 'research',
       }),
+    );
+  });
+
+  it('prices a recorded interaction trace with the platform counting logic', async () => {
+    const verify = mockTrpcClient.verify as Record<string, any>;
+    const atom = (operators: Record<string, number>) =>
+      JSON.stringify({
+        klm: { category: 'action', operators },
+        phase: { id: 'login', label: 'Login' },
+        schema: 'lobehub.agentBrowserKlmTrace@1',
+      });
+    writeFileSync(
+      path.join(dir, 'interaction-trace.jsonl'),
+      `${atom({ K: 1, P: 1 })}\n${atom({ R_ms: 2000 })}\n`,
+    );
+
+    await run(['ingest-report', dir, '--json']);
+
+    expect(verify.createRun.mutate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          interactionCost: expect.objectContaining({
+            activeSeconds: 1.3,
+            model: 'goms-klm@lobe-v1',
+            sourceTrace: 'interaction-trace.jsonl',
+            totalSeconds: 3.3,
+          }),
+        }),
+      }),
+    );
+  });
+
+  it('publishes without interaction cost when no trace was recorded', async () => {
+    // A CLI-only round, or a machine with no agent-browser, records no trace.
+    // Interaction cost is an optional overlay: absent must stay silent, never a
+    // warning and never a 0s measurement rendered as a real one.
+    const verify = mockTrpcClient.verify as Record<string, any>;
+    const warnSpy = vi.spyOn(log, 'warn').mockImplementation(() => {});
+
+    await run(['ingest-report', dir, '--json']);
+
+    const metadata = verify.createRun.mutate.mock.calls[0][0].metadata;
+    expect(metadata?.interactionCost).toBeUndefined();
+    expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining('interaction'));
+    warnSpy.mockRestore();
+  });
+
+  it('still prices the trace when result.json scaffolds interactionCost as null', async () => {
+    // Regression (found by running the flow): `report-init.sh` writes
+    // `"interactionCost": null` to document the field. Treating key presence as
+    // an explicit summary made the project's own scaffolder silently suppress
+    // pricing on every traced round it created.
+    const verify = mockTrpcClient.verify as Record<string, any>;
+    writeFileSync(
+      path.join(dir, 'result.json'),
+      JSON.stringify({ cases: [], interactionCost: null }),
+    );
+    writeFileSync(
+      path.join(dir, 'interaction-trace.jsonl'),
+      `${JSON.stringify({
+        klm: { category: 'action', operators: { P: 1 } },
+        schema: 'lobehub.agentBrowserKlmTrace@1',
+      })}\n`,
+    );
+
+    await run(['ingest-report', dir, '--json']);
+
+    expect(verify.createRun.mutate.mock.calls[0][0].metadata.interactionCost).toMatchObject({
+      totalSeconds: 1.1,
+    });
+  });
+
+  it('keeps an explicit result.json interactionCost over the trace', async () => {
+    const verify = mockTrpcClient.verify as Record<string, any>;
+    writeFileSync(
+      path.join(dir, 'result.json'),
+      JSON.stringify({
+        cases: [],
+        interactionCost: {
+          activeSeconds: 9,
+          model: 'hand-written',
+          operators: {},
+          totalSeconds: 9,
+          waitSeconds: 0,
+        },
+      }),
+    );
+    writeFileSync(
+      path.join(dir, 'interaction-trace.jsonl'),
+      `${JSON.stringify({ klm: { operators: { P: 1 } } })}\n`,
+    );
+
+    await run(['ingest-report', dir, '--json']);
+
+    expect(verify.createRun.mutate.mock.calls[0][0].metadata.interactionCost.model).toBe(
+      'hand-written',
     );
   });
 
@@ -967,6 +1133,18 @@ describe('originFromEnv — in-app provenance', () => {
     });
   });
 
+  it('retains conversation provenance for persistent Pi without an authoring operation', () => {
+    process.env.LOBEHUB_AGENT_ID = 'agt_pi';
+    process.env.LOBEHUB_TOPIC_ID = 'tpc_pi';
+    delete process.env.LOBEHUB_OPERATION_ID;
+
+    expect(originFromEnv()).toEqual({
+      agentId: 'agt_pi',
+      operationId: undefined,
+      topicId: 'tpc_pi',
+    });
+  });
+
   it('never takes its operationId from --operation, which names the run under TEST', () => {
     // `--operation` links the session to the Agent Run being verified; origin is
     // the run that AUTHORED the report. Conflating them attributes the report to
@@ -1002,6 +1180,15 @@ describe('deriveReportVerdict — headline fallback when summary.verdict is abse
 
   it('no cases → no derived verdict', () => {
     expect(deriveReportVerdict([])).toBeUndefined();
+  });
+
+  it('reads the documented `status` field, same as the per-case ingest', () => {
+    // Regression: `status` was skipped here while the per-case ingest reads
+    // `result ?? status ?? verdict`, so an all-pass report written with the
+    // documented field derived `uncertain` whenever this fallback ran (e.g.
+    // after the programmatic-test screen recounts the summary).
+    expect(deriveReportVerdict([{ status: 'pass' }, { status: 'pass' }])).toBe('passed');
+    expect(deriveReportVerdict([{ status: 'pass' }, { status: 'fail' }])).toBe('failed');
   });
 });
 
@@ -1094,54 +1281,6 @@ describe('lh acceptance — canonical run tree', () => {
     expect(output.url).toBe('https://app.lobehub.com/verify/run_1');
   });
 
-  it('exposes `acceptance install` defaulting to the acceptance skill', async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'acceptance-install-'));
-    mockTrpcClient.verify.getSkillBundle.query.mockReset().mockResolvedValue({
-      content: '# Acceptance SKILL',
-      files: {},
-      identifier: 'acceptance',
-      name: 'acceptance',
-    });
-    await run(['install', '--dir', dir]);
-    expect(mockTrpcClient.verify.getSkillBundle.query).toHaveBeenCalledWith({
-      identifier: 'acceptance',
-    });
-    expect(existsSync(path.join(dir, '.agents', 'skills', 'acceptance', 'SKILL.md'))).toBe(true);
-    rmSync(dir, { force: true, recursive: true });
-  });
-
-  it('removes stale materialized resources on `acceptance update`', async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'acceptance-update-'));
-    mockTrpcClient.verify.getSkillBundle.query.mockReset().mockResolvedValueOnce({
-      content: '# Acceptance SKILL',
-      files: {
-        'references/auth.md': '# Mixed auth',
-        'references/recording.md': '# Mixed recording',
-      },
-      identifier: 'acceptance',
-      name: 'acceptance',
-    });
-    await run(['install', '--dir', dir]);
-
-    mockTrpcClient.verify.getSkillBundle.query.mockResolvedValueOnce({
-      content: '# Acceptance SKILL v2',
-      files: {
-        'references/auth-web.md': '# Web auth',
-        'references/recording-cdp.md': '# CDP recording',
-      },
-      identifier: 'acceptance',
-      name: 'acceptance',
-    });
-    await run(['update', '--dir', dir]);
-
-    const skillDir = path.join(dir, '.agents', 'skills', 'acceptance');
-    expect(existsSync(path.join(skillDir, 'references', 'auth.md'))).toBe(false);
-    expect(existsSync(path.join(skillDir, 'references', 'recording.md'))).toBe(false);
-    expect(existsSync(path.join(skillDir, 'references', 'auth-web.md'))).toBe(true);
-    expect(existsSync(path.join(skillDir, 'references', 'recording-cdp.md'))).toBe(true);
-    rmSync(dir, { force: true, recursive: true });
-  });
-
   it('does NOT attach the run subtree to the deprecated `verify acceptance` alias', async () => {
     const program = new Command();
     program.exitOverride();
@@ -1185,5 +1324,24 @@ describe('formatAnnotationRegion', () => {
   it('returns undefined when there is no location at all', () => {
     expect(formatAnnotationRegion({ comment: 'just a note' })).toBeUndefined();
     expect(formatAnnotationRegion({ rect: { x: 0.1 } })).toBeUndefined();
+  });
+});
+
+describe('file evidence descriptions', () => {
+  it('preserves an explicit description', () => {
+    expect(evidenceDescriptionForFile('Goal final state', '/tmp/state.json')).toBe(
+      'Goal final state',
+    );
+  });
+
+  it('retains the basename when a file is inlined without a description', () => {
+    expect(evidenceDescriptionForFile(undefined, '/tmp/goal-final-state.json')).toBe(
+      'goal-final-state.json',
+    );
+    expect(evidenceDescriptionForFile('  ', '/tmp/events.json')).toBe('events.json');
+  });
+
+  it('does not invent a description for inline content', () => {
+    expect(evidenceDescriptionForFile(undefined)).toBeUndefined();
   });
 });

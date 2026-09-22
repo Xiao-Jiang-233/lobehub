@@ -4,6 +4,7 @@ import { Flexbox, Form } from '@lobehub/ui';
 import { Switch } from '@lobehub/ui/base-ui';
 import { Form as AntdForm } from 'antd';
 import isEqual from 'fast-deep-equal';
+import { MODEL_REASONING_EXTEND_PARAMS } from 'model-bank/aiModel';
 import type { ReactNode } from 'react';
 import { memo, useEffect, useMemo } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
@@ -21,16 +22,21 @@ import { aiModelSelectors, useAiInfraStore } from '@/store/aiInfra';
 
 import CodexMaxReasoningEffortSlider from './CodexMaxReasoningEffortSlider';
 import ContextCachingSwitch from './ContextCachingSwitch';
-import DeepSeekReasoningEffortSlider from './DeepSeekReasoningEffortSlider';
+import DeepSeekReasoningEffortSlider, {
+  DeepSeekV4GAReasoningEffortSlider,
+} from './DeepSeekReasoningEffortSlider';
 import EffortSlider from './EffortSlider';
 import GLM52ReasoningEffortSlider from './GLM52ReasoningEffortSlider';
+import GLM53ReasoningEffortSlider from './GLM53ReasoningEffortSlider';
 import GPT5ReasoningEffortSlider from './GPT5ReasoningEffortSlider';
+import { GPT6ReasoningEffortSlider } from './GPT6ReasoningEffortSlider';
 import GPT51ReasoningEffortSlider from './GPT51ReasoningEffortSlider';
 import GPT52ProReasoningEffortSlider from './GPT52ProReasoningEffortSlider';
 import GPT52ReasoningEffortSlider from './GPT52ReasoningEffortSlider';
 import { GPT56ReasoningEffortSlider } from './GPT56ReasoningEffortSlider';
 import Grok43ReasoningEffortSlider from './Grok43ReasoningEffortSlider';
 import Grok45ReasoningEffortSlider from './Grok45ReasoningEffortSlider';
+import Grok46ReasoningEffortSlider from './Grok46ReasoningEffortSlider';
 import Grok420ReasoningEffortSlider from './Grok420ReasoningEffortSlider';
 import Hy3ReasoningEffortSlider from './Hy3ReasoningEffortSlider';
 import ImageAspectRatio2Select from './ImageAspectRatio2Select';
@@ -39,6 +45,7 @@ import ImageResolution2Slider from './ImageResolution2Slider';
 import ImageResolutionSlider from './ImageResolutionSlider';
 import { KimiK3ReasoningEffortSlider } from './KimiK3ReasoningEffortSlider';
 import Opus47EffortSlider from './Opus47EffortSlider';
+import Qwen38ReasoningEffortSlider from './Qwen38ReasoningEffortSlider';
 import ReasoningEffortSlider from './ReasoningEffortSlider';
 import ReasoningModeSegmented from './ReasoningModeSegmented';
 import ReasoningTokenSlider from './ReasoningTokenSlider';
@@ -54,6 +61,8 @@ import ThinkingLevel4Slider from './ThinkingLevel4Slider';
 import ThinkingLevelSlider from './ThinkingLevelSlider';
 import ThinkingSlider from './ThinkingSlider';
 
+const REASONING_PARAMS_SET = new Set<string>(MODEL_REASONING_EXTEND_PARAMS);
+
 interface ControlsFormProps {
   /**
    * Override the config source. Defaults to the agent's own chatConfig; the
@@ -61,6 +70,14 @@ interface ControlsFormProps {
    */
   chatConfig?: LobeAgentChatConfig;
   disabled?: boolean;
+  /**
+   * Hide the reasoning-effort family + reasoningMode controls. The main-agent
+   * params panel sets this: those fields migrated to user-level model-instance
+   * settings edited via the ChatInput Effort control, so agent chatConfig
+   * writes here would be ignored at send time. The sub-agent panel keeps them
+   * as explicit per-sub-agent overrides.
+   */
+  hideReasoningParams?: boolean;
   model?: string;
   /**
    * Override the write sink. Defaults to updating the agent's chatConfig; the
@@ -95,6 +112,7 @@ const ControlsForm = memo<ControlsFormProps>(
   ({
     chatConfig: chatConfigProp,
     disabled,
+    hideReasoningParams,
     model: modelProp,
     onChatConfigChange,
     onUpdatingChange,
@@ -141,6 +159,7 @@ const ControlsForm = memo<ControlsFormProps>(
 
     const gpt52ReasoningEffortDefaultValue = model === 'gpt-5.5' ? 'medium' : 'none';
     const thinkingLevelDefaultValue = resolveDefaultThinkingLevelForModel(model);
+    const thinkingLevel3DefaultValue = resolveDefaultThinkingLevelForModel(model, 'thinkingLevel3');
 
     // Show descriptions as a question-mark tooltip beside the label, matching
     // the ControlRow items rendered above this form in the params panel.
@@ -235,11 +254,31 @@ const ControlsForm = memo<ControlsFormProps>(
         },
       },
       {
+        children: <DeepSeekV4GAReasoningEffortSlider />,
+        label: t('extendParams.reasoningEffort.title'),
+        layout: 'vertical',
+        minWidth: undefined,
+        name: 'deepseekV4GAReasoningEffort',
+        style: {
+          paddingBottom: 0,
+        },
+      },
+      {
         children: <DeepSeekReasoningEffortSlider />,
         label: t('extendParams.reasoningEffort.title'),
         layout: 'vertical',
         minWidth: undefined,
         name: 'deepseekV4ReasoningEffort',
+        style: {
+          paddingBottom: 0,
+        },
+      },
+      {
+        children: <Qwen38ReasoningEffortSlider />,
+        label: t('extendParams.reasoningEffort.title'),
+        layout: 'vertical',
+        minWidth: undefined,
+        name: 'qwen38ReasoningEffort',
         style: {
           paddingBottom: 0,
         },
@@ -328,6 +367,16 @@ const ControlsForm = memo<ControlsFormProps>(
         },
       },
       {
+        children: <GPT6ReasoningEffortSlider />,
+        label: t('extendParams.reasoningEffort.title'),
+        layout: 'vertical',
+        minWidth: undefined,
+        name: 'gpt6ReasoningEffort',
+        style: {
+          paddingBottom: 0,
+        },
+      },
+      {
         children: <GPT52ProReasoningEffortSlider />,
         label: t('extendParams.reasoningEffort.title'),
         layout: 'vertical',
@@ -343,6 +392,16 @@ const ControlsForm = memo<ControlsFormProps>(
         layout: 'vertical',
         minWidth: undefined,
         name: 'glm5_2ReasoningEffort',
+        style: {
+          paddingBottom: 0,
+        },
+      },
+      {
+        children: <GLM53ReasoningEffortSlider />,
+        label: t('extendParams.reasoningEffort.title'),
+        layout: 'vertical',
+        minWidth: undefined,
+        name: 'glm5_3ReasoningEffort',
         style: {
           paddingBottom: 0,
         },
@@ -373,6 +432,16 @@ const ControlsForm = memo<ControlsFormProps>(
         layout: 'vertical',
         minWidth: undefined,
         name: 'grok4_5ReasoningEffort',
+        style: {
+          paddingBottom: 0,
+        },
+      },
+      {
+        children: <Grok46ReasoningEffortSlider />,
+        label: t('extendParams.reasoningEffort.title'),
+        layout: 'vertical',
+        minWidth: undefined,
+        name: 'grok4_6ReasoningEffort',
         style: {
           paddingBottom: 0,
         },
@@ -489,7 +558,7 @@ const ControlsForm = memo<ControlsFormProps>(
         },
       },
       {
-        children: <ThinkingLevel3Slider />,
+        children: <ThinkingLevel3Slider defaultValue={thinkingLevel3DefaultValue} />,
         label: t('extendParams.thinkingLevel.title'),
         layout: 'vertical',
         minWidth: undefined,
@@ -566,6 +635,7 @@ const ControlsForm = memo<ControlsFormProps>(
           variant={'borderless'}
           items={
             (modelExtendParams || [])
+              .filter((item: any) => !(hideReasoningParams && REASONING_PARAMS_SET.has(item)))
               .map((item: any) => items.find((i) => i.name === item))
               .filter(Boolean) as FormItemProps[]
           }

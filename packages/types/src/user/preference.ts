@@ -19,7 +19,9 @@ import type { NotificationSettings } from './settings/notification';
  * another. See `resolveAgencyConfig` in
  * `packages/types/src/agent/agencyConfig.ts` for the merge implementation.
  *
- * Two fields only, deliberately: `executionTarget` + `boundDeviceId`.
+ * Routing fields only, deliberately: `executionTarget`, `boundDeviceId`, and
+ * the two `localSandbox*` fields (which qualify *this member's* local execution
+ * — how hard their own machine is fenced is theirs to decide).
  * `heterogeneousProvider`, `verifyRubricId`, and `workingDirByDevice` remain
  * agent-shared because they describe *what the agent is*, not *how this user
  * routes it*.
@@ -27,6 +29,8 @@ import type { NotificationSettings } from './settings/notification';
 export interface AgentDeviceOverride {
   boundDeviceId?: string;
   executionTarget?: DeviceExecutionTarget;
+  localSandbox?: boolean;
+  localSandboxNetwork?: boolean;
 }
 
 /**
@@ -154,10 +158,6 @@ export const UserLabSchema = z.object({
    */
   enableAgentGraphConfig: z.boolean().optional(),
   /**
-   * enable agent self-iteration feedback capture and policy execution
-   */
-  enableAgentSelfIteration: z.boolean().optional(),
-  /**
    * enable artifact deployment features (publish artifacts to a hosted URL)
    */
   enableArtifactDeployment: z.boolean().optional(),
@@ -169,6 +169,10 @@ export const UserLabSchema = z.object({
    * run Codex hetero sessions through codex app-server instead of one-shot CLI spawn
    */
   enableCodexAppServer: z.boolean().optional(),
+  /**
+   * enable displaying two desktop tabs side by side
+   */
+  enableDesktopSplitView: z.boolean().optional(),
   /**
    * one-click import of local Claude Code / Codex CLI sessions as topics (desktop only)
    */
@@ -182,10 +186,6 @@ export const UserLabSchema = z.object({
    */
   enableImessage: z.boolean().optional(),
   /**
-   * show the in-app Browser tab in the conversation WorkingSidebar (desktop only)
-   */
-  enableInAppBrowser: z.boolean().optional(),
-  /**
    * enable markdown rendering in chat input editor
    */
   enableInputMarkdown: z.boolean().optional(),
@@ -194,13 +194,33 @@ export const UserLabSchema = z.object({
    */
   enableMessageTextSelectionActions: z.boolean().optional(),
   /**
+   * show the Integrations settings page (GitHub App and the coming-soon
+   * directory); hidden until the closed loop leaves alpha
+   */
+  enableIntegrations: z.boolean().optional(),
+  /**
    * show OAuth app management in personal and workspace settings
    */
   enableOAuthApps: z.boolean().optional(),
   /**
+   * enable the project workspace experiment
+   */
+  enableProjects: z.boolean().optional(),
+  /**
+   * show the per-agent self-learning (expertise) page and its sidebar entry
+   */
+  enableSelfLearning: z.boolean().optional(),
+  /**
    * enable the task delivery-acceptance (verify) config UI on the task detail
    */
   enableTaskVerify: z.boolean().optional(),
+  /** Capture a conversation turn as an eval test case (developer-facing). */
+  enableEvalCapture: z.boolean().optional(),
+  /**
+   * route every agent run in this tab over one shared gateway WebSocket
+   * (protocol v2 mux) instead of one socket per run
+   */
+  enableGatewayMux: z.boolean().optional(),
   /**
    * enable the per-topic acceptance tray above the composer (author a topic's
    * delivery checklist inline)
@@ -210,6 +230,36 @@ export const UserLabSchema = z.object({
 
 export type UserLab = z.infer<typeof UserLabSchema>;
 
+/** Automation switches for the GitHub integration. Every switch defaults to on. */
+export interface GithubIntegrationPreference {
+  /** Merging a linked pull request accepts its acceptance. */
+  acceptOnMerge?: boolean;
+  /** Post a LobeHub comment (acceptance + conversation links) on pull requests in private repositories. Default on. */
+  commentOnPrivateRepositories?: boolean;
+  /** Same for public repositories. Default off: a public thread is not the place for internal links. */
+  commentOnPublicRepositories?: boolean;
+  /** A failing check wakes the agent that opened the pull request. */
+  wakeOnCiFailure?: boolean;
+  /** Review feedback (changes requested, comments) wakes the agent. */
+  wakeOnReview?: boolean;
+}
+
+export interface UserIntegrationPreference {
+  github?: GithubIntegrationPreference;
+}
+
+export const GithubIntegrationPreferenceSchema = z.object({
+  acceptOnMerge: z.boolean().optional(),
+  commentOnPrivateRepositories: z.boolean().optional(),
+  commentOnPublicRepositories: z.boolean().optional(),
+  wakeOnCiFailure: z.boolean().optional(),
+  wakeOnReview: z.boolean().optional(),
+});
+
+export const UserIntegrationPreferenceSchema = z.object({
+  github: GithubIntegrationPreferenceSchema.optional(),
+});
+
 export interface UserPreference {
   /** Last-used app for "Open working directory in…" split button. Empty/unknown values fall back to platform default. */
   defaultOpenInApp?: string;
@@ -218,11 +268,22 @@ export interface UserPreference {
    * @deprecated Use lab.enableInputMarkdown instead
    */
   disableInputMarkdownRender?: boolean;
+  /**
+   * CSS font-family value used as the global default UI font.
+   * Empty or whitespace-only values fall back to the application font stack.
+   */
+  fontFamily?: string;
   guide?: UserGuide;
   hideSyncAlert?: boolean;
   /**
    * lab experimental features
    */
+  /**
+   * Per-integration automation switches, edited on Settings → Integrations.
+   * Absent keys mean "on": the closed loop is the default, the switch is the
+   * opt-out.
+   */
+  integration?: UserIntegrationPreference;
   lab?: UserLab;
   /**
    * Last active workspace id. Used on cloud to land the user back in the
@@ -311,8 +372,10 @@ export interface SSOProvider {
 export const UserPreferenceSchema = z
   .object({
     defaultOpenInApp: z.string().optional(),
+    fontFamily: z.string().optional(),
     guide: UserGuideSchema.optional(),
     hideSyncAlert: z.boolean().optional(),
+    integration: UserIntegrationPreferenceSchema.optional(),
     lab: UserLabSchema.optional(),
     lastWorkspaceId: z.string().nullish(),
     sidebarHiddenAgentIds: z.array(z.string()).optional(),

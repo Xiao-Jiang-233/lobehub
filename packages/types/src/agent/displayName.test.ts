@@ -31,18 +31,48 @@ describe('agentDisplayName', () => {
 });
 
 describe('agentSecondaryDisplayName', () => {
-  it('prefers a runtime label over a platform profile title', () => {
-    expect(agentSecondaryDisplayName({ name: '陆令言', title: 'default' }, 'Hermes')).toBe(
-      'Hermes',
-    );
-    expect(agentSecondaryDisplayName({ name: '燕来', title: 'Pi' }, 'Pi')).toBe('Pi');
-  });
-
-  it('keeps regular roles and suppresses labels that duplicate the primary name', () => {
+  it('shows the role of a named agent', () => {
     expect(agentSecondaryDisplayName({ name: 'Alice', title: 'Health Assistant' })).toBe(
       'Health Assistant',
     );
-    expect(agentSecondaryDisplayName({ title: 'Pi' }, 'Pi')).toBeUndefined();
+  });
+
+  it('treats a heterogeneous agent like any other — its role, not its runtime', () => {
+    expect(agentSecondaryDisplayName({ name: '陆令言', title: 'default' })).toBe('default');
+  });
+
+  it('shows nothing when the title is already the primary label', () => {
     expect(agentSecondaryDisplayName({ title: 'Health Assistant' })).toBeUndefined();
+    expect(agentSecondaryDisplayName({ name: '  ', title: 'Pi' })).toBeUndefined();
+  });
+
+  it('suppresses a role the primary name already spells out as its suffix', () => {
+    expect(
+      agentSecondaryDisplayName({ name: 'Max 的 Kimi Code', title: 'Kimi Code' }),
+    ).toBeUndefined();
+    expect(
+      agentSecondaryDisplayName({ name: "MaxLiu's Claude Code", title: 'Claude Code' }),
+    ).toBeUndefined();
+    expect(
+      agentSecondaryDisplayName({ name: 'Claude Code', title: 'Claude Code' }),
+    ).toBeUndefined();
+  });
+
+  it('restores the role tag once the name no longer echoes it', () => {
+    expect(agentSecondaryDisplayName({ name: '小K', title: 'Kimi Code' })).toBe('Kimi Code');
+  });
+
+  it('keeps the tag when the name merely contains the role as a substring', () => {
+    expect(agentSecondaryDisplayName({ name: 'Arthur', title: 'Art' })).toBe('Art');
+    expect(agentSecondaryDisplayName({ name: 'MozArt', title: 'Art' })).toBe('Art');
+    expect(agentSecondaryDisplayName({ name: 'Claude Code 助手', title: 'Claude Code' })).toBe(
+      'Claude Code',
+    );
+  });
+
+  it('treats a blank role as absent', () => {
+    expect(agentSecondaryDisplayName({ name: 'Alice', title: '   ' })).toBeUndefined();
+    expect(agentSecondaryDisplayName({ name: 'Alice' })).toBeUndefined();
+    expect(agentSecondaryDisplayName(null)).toBeUndefined();
   });
 });

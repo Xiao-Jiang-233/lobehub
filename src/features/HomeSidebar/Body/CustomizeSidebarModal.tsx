@@ -20,8 +20,15 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { ActionIcon, Flexbox, Icon, Text, Tooltip } from '@lobehub/ui';
-import { Button, createModal, type ModalInstance, useModalContext } from '@lobehub/ui/base-ui';
+import { Flexbox, Icon, Tooltip } from '@lobehub/ui';
+import {
+  ActionIcon,
+  Button,
+  createModal,
+  type ModalInstance,
+  Text,
+  useModalContext,
+} from '@lobehub/ui/base-ui';
 import { createStaticStyles, cssVar, cx } from 'antd-style';
 import { t } from 'i18next';
 import { ArrowDownToLine, Eye, EyeOff, GripVertical, PinIcon, RotateCcw } from 'lucide-react';
@@ -59,6 +66,7 @@ const ALL_SIDEBAR_ITEMS: SidebarItemConfig[] = [
   { id: 'tasks', labelKey: 'tab.tasks', routeId: 'tasks' },
   { id: 'pages', labelKey: 'tab.pages', routeId: 'page' },
   { id: 'recents', labelKey: 'recents' },
+  { id: 'project', labelKey: 'project:sidebar.title' },
   { id: 'private', labelKey: 'navPanel.privateAgents' },
   { alwaysVisible: true, id: 'agent', labelKey: 'navPanel.agent' },
   { id: 'image', labelKey: 'tab.generation', routeId: 'image' },

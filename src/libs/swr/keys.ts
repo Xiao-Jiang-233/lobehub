@@ -48,6 +48,8 @@ interface LocalFilePreviewKeyParams {
 // ---- message ------------------------------------------------------------
 export interface MessageListQueryContext {
   agentId?: string | null;
+  /** Agent-share visitor surface — routes the read through `shareChat.getMessages`. */
+  agentShareId?: string;
   groupId?: string | null;
   threadId?: string | null;
   topicId?: string | null;
@@ -56,6 +58,7 @@ export interface MessageListQueryContext {
 
 export interface CanonicalMessageListContext {
   agentId: string | null;
+  agentShareId?: string;
   groupId: string | null;
   threadId: string | null;
   topicId: string | null;
@@ -76,6 +79,7 @@ export const normalizeMessageListQueryContext = (
   threadId: context.threadId ?? null,
   topicId: context.topicId ?? null,
   ...(context.topicShareId === undefined ? {} : { topicShareId: context.topicShareId }),
+  ...(context.agentShareId === undefined ? {} : { agentShareId: context.agentShareId }),
 });
 
 /** Previous persisted key schema, used only by the targeted v1 → v2 migration. */
@@ -124,6 +128,7 @@ export const topicKeys = {
     containerKey,
     opts,
   ]),
+  detail: def('topic:detail', (topicId: string) => ['topic:detail', topicId]),
   list: def('topic:list', (containerKey: string, opts: Record<string, unknown>) => [
     'topic:list',
     containerKey,
@@ -171,6 +176,79 @@ export const topicCommentKeys = {
   ]),
 };
 
+// ---- acceptance comment -------------------------------------------------
+export const acceptanceCommentKeys = {
+  list: def('acceptanceComment:list', (acceptanceId: string) => [
+    'acceptanceComment:list',
+    acceptanceId,
+  ]),
+};
+
+// ---- document comment ---------------------------------------------------
+export const documentCommentKeys = {
+  anchors: def('documentComment:anchors', (workspaceId: string | null, documentId: string) => [
+    'documentComment:anchors',
+    workspaceId ?? '',
+    documentId,
+  ]),
+  detail: def('documentComment:detail', (workspaceId: string | null, commentId: string) => [
+    'documentComment:detail',
+    workspaceId ?? '',
+    commentId,
+  ]),
+  replies: def(
+    'documentComment:replies',
+    (workspaceId: string | null, rootCommentId: string, cursor?: string) => [
+      'documentComment:replies',
+      workspaceId ?? '',
+      rootCommentId,
+      cursor ?? '',
+    ],
+  ),
+  summary: def('documentComment:summary', (documentId: string) => [
+    'documentComment:summary',
+    documentId,
+  ]),
+  threads: def(
+    'documentComment:threads',
+    (
+      workspaceId: string | null,
+      documentId: string,
+      cursor?: string,
+      /** `'anchored'` / `'document'` page one subset; `'all'` pages every root. */
+      scope: 'all' | 'anchored' | 'document' = 'all',
+    ) => ['documentComment:threads', workspaceId ?? '', documentId, cursor ?? '', scope],
+  ),
+};
+
+// ---- document like ------------------------------------------------------
+export const documentLikeKeys = {
+  summary: def('documentLike:summary', (workspaceId: string | null, documentId: string) => [
+    'documentLike:summary',
+    workspaceId ?? '',
+    documentId,
+  ]),
+};
+
+export const isDocumentCommentKeyForEvent = (
+  key: unknown,
+  event: { documentId: string; rootCommentId?: string; workspaceId: string },
+): boolean => {
+  if (!Array.isArray(key)) return false;
+
+  if (key[0] === documentCommentKeys.summary.root) return key[1] === event.documentId;
+  if (key[1] !== event.workspaceId) return false;
+  // Deep-link detail entries are few (at most a pinned root and reply) and events do not
+  // carry the comment id, so revalidate them on any comment event in the workspace.
+  if (key[0] === documentCommentKeys.detail.root) return true;
+  if (key[0] === documentCommentKeys.threads.root) return key[2] === event.documentId;
+  if (key[0] === documentCommentKeys.anchors.root) return key[2] === event.documentId;
+  if (key[0] === documentCommentKeys.replies.root) {
+    return !event.rootCommentId || key[2] === event.rootCommentId;
+  }
+  return false;
+};
+
 // ---- agent --------------------------------------------------------------
 export const agentKeys = {
   /** Sidebar agent list. */
@@ -192,18 +270,22 @@ export const agentLabelKeys = {
 };
 
 // ---- agent builder (opening-suggestion chips) ---------------------------
-// Kept off `CACHE_TIERS` on purpose — these are ephemeral LLM-generated chips.
-// `contextSummary` is intentionally NOT part of the key so config autosaves for
-// the same target don't refetch; `nonce` bumps on manual refresh.
+// Persisted to the localStorage tier (see `CACHE_TIERS.local`) so revisits skip
+// the LLM generation instead of paying a skeleton + a generateJSON call every
+// page load. `contextSummary` is intentionally NOT part of the key so config
+// autosaves for the same target don't refetch; manual refresh revalidates the
+// same key in place (see `useBuilderSuggestions`). `locale` IS part of the key:
+// chips are generated in the UI language, so a persisted entry must not be
+// served after a language switch.
 export const agentBuilderKeys = {
   suggestions: def(
     'agentBuilder:suggestions',
-    (mode: string, builderAgentId: string, targetId: string | undefined, nonce: number) => [
+    (mode: string, builderAgentId: string, targetId: string | undefined, locale?: string) => [
       'agentBuilder:suggestions',
       mode,
       builderAgentId,
       targetId,
-      nonce,
+      locale ?? null,
     ],
   ),
 };
@@ -258,22 +340,136 @@ export const recentKeys = {
 };
 
 // ---- task ---------------------------------------------------------------
+/**
+ * SWR `mutate` matcher for every cached `task:list` variant — any agent scope,
+ * visibility chip, ordering, or automation filter. A task edit can move a row
+ * across each of those boundaries at once (reassigning, sharing, touching its
+ * `updatedAt`, attaching a schedule), so refresh invalidates by key root
+ * instead of enumerating variants.
+ */
+export const isTaskListKey = (key: unknown): boolean =>
+  Array.isArray(key) && key[0] === 'task:list';
+
+export const isScheduledTaskListKey = (key: unknown): boolean =>
+  Array.isArray(key) && key[0] === 'task:scheduledList';
+
+export const isMyTaskListKey = (key: unknown): boolean =>
+  Array.isArray(key) && key[0] === 'task:myList';
+
+/**
+ * Goal Graph reads. Keyed by the `goals` row id (not the carrier task's
+ * identifier) because that is what every `goal.*` procedure takes.
+ */
+export const goalKeys = {
+  graph: def('goal:graph', (goalId: string) => ['goal:graph', goalId]),
+  metricSeries: def('goal:metricSeries', (goalId: string) => ['goal:metricSeries', goalId]),
+  /** Goals whose planning conversation is this topic (`subject_type = 'topic'`). */
+  topicGoals: def('goal:topicGoals', (topicId: string) => ['goal:topicGoals', topicId]),
+};
+
 export const taskKeys = {
   detail: def('task:detail', (taskId: string) => ['task:detail', taskId]),
   groupList: def(
     'task:groupList',
-    (agentKey: string | undefined, visibility: 'all' | 'private' | 'workspace' = 'all') => [
-      'task:groupList',
-      agentKey,
-      visibility,
-    ],
+    (
+      agentKey: string | undefined,
+      visibility: 'all' | 'private' | 'workspace' = 'all',
+      groupBy: 'assignee' | 'member' | 'priority' | 'status' = 'status',
+      excludeStatuses?: string,
+      projectId?: string,
+      automated?: boolean,
+    ) => {
+      const hasBoardFilter = groupBy !== 'status' || excludeStatuses !== undefined;
+      const key = hasBoardFilter
+        ? projectId
+          ? ['task:groupList', agentKey, visibility, groupBy, excludeStatuses, projectId]
+          : ['task:groupList', agentKey, visibility, groupBy, excludeStatuses]
+        : projectId
+          ? ['task:groupList', agentKey, visibility, projectId]
+          : ['task:groupList', agentKey, visibility];
+
+      return automated === undefined ? key : [...key, { automated }];
+    },
   ),
+  /**
+   * The home rail's cross-agent goal roll-up. Scoped by cache scope like the
+   * other home feeds — goals are workspace rows, so a list left over from the
+   * previous workspace holds ids this one cannot open.
+   */
+  homeGoals: def('task:homeGoals', (scope: string) => ['task:homeGoals', scope]),
   list: def(
     'task:list',
-    (agentKey: string | undefined, visibility: 'all' | 'private' | 'workspace' = 'all') => [
-      'task:list',
+    (
+      agentKey: string | undefined,
+      visibility: 'all' | 'private' | 'workspace' = 'all',
+      // Part of the key, not a detail: Home orders by activity while the Tasks
+      // page orders by creation, and they read the same store field.
+      orderBy: 'createdAt' | 'updatedAt' = 'createdAt',
+      projectId?: string,
+      // Same reasoning as `orderBy`: Home's recent block excludes live
+      // automation and finished statuses server-side while the Tasks page
+      // fetches everything, and a shared entry would serve one surface the
+      // other's filter. Folded into one trailing slot (appended only when a
+      // filter is actually set) so unfiltered keys keep their shape.
+      // `complete` marks the every-page walk the Tasks list view does; the
+      // kanban view and Home read a single page and must not be served (or
+      // serve) the walked list from a shared entry.
+      filters?: { automated?: boolean; complete?: boolean; statuses?: readonly string[] },
+    ) => {
+      const key = projectId
+        ? ['task:list', agentKey, visibility, orderBy, projectId]
+        : ['task:list', agentKey, visibility, orderBy];
+      const automated = filters?.automated;
+      const complete = filters?.complete ? true : undefined;
+      // Order-insensitive: the same status set must hash to the same key.
+      const statuses = filters?.statuses?.length
+        ? [...filters.statuses].sort().join(',')
+        : undefined;
+      if (automated === undefined && complete === undefined && statuses === undefined) return key;
+      return [
+        ...key,
+        {
+          ...(automated === undefined ? {} : { automated }),
+          ...(complete === undefined ? {} : { complete }),
+          ...(statuses === undefined ? {} : { statuses }),
+        },
+      ];
+    },
+  ),
+  /**
+   * Home's automated-task roll-up: the tasks that fire on a schedule or a
+   * heartbeat. Kept off `list` because it is a different result set entirely —
+   * sharing the key would let one section's fetch overwrite the other's.
+   */
+  /**
+   * The Tasks page's "My tasks" tab: work assigned to, or created by, the
+   * caller. Its own root for the same reason as `scheduledList` — a different
+   * result set from `list`, so a shared entry would let one tab's fetch
+   * overwrite the other's.
+   */
+  myList: def(
+    'task:myList',
+    (scope: 'assigned' | 'created', statuses?: string[], limit?: number, offset?: number) => [
+      'task:myList',
+      scope,
+      // Status narrowing is part of the identity: "hide completed" and "show
+      // all" are different server pages, not a client-side view of one page.
+      statuses ? [...statuses].sort().join(',') : 'all',
+      ...(limit === undefined && offset === undefined ? [] : [{ limit, offset }]),
+    ],
+  ),
+  scheduledList: def(
+    'task:scheduledList',
+    (
+      agentKey: string | undefined,
+      visibility: 'all' | 'private' | 'workspace' = 'all',
+      limit?: number,
+      offset?: number,
+    ) => [
+      'task:scheduledList',
       agentKey,
       visibility,
+      ...(limit === undefined && offset === undefined ? [] : [{ limit, offset }]),
     ],
   ),
   /**
@@ -294,17 +490,18 @@ export const workKeys = {
   versions: def('work:versions', (workId: string) => ['work:versions', workId]),
   // Cross-topic Work gallery on the resource page: keyed by owner scope + the
   // gallery filter key (type OR provider tab, e.g. `all` / `task` / `linear`) +
-  // keyset cursor (one entry per infinite-scroll page). The filter key (not the
-  // Work type) is the discriminator so the per-provider linear/github tabs,
-  // which share the `external` Work type, get distinct cache entries.
+  // keyset cursor (one entry per infinite-scroll page) + the Resources
+  // Private/Workspace visibility. The filter key (not the Work type) is the
+  // discriminator so the per-provider linear/github tabs, which share the
+  // `external` Work type, get distinct cache entries.
   workspace: def(
     'work:workspace',
-    (workspaceId: string | null | undefined, filterKey: string, cursor?: string | null) => [
-      'work:workspace',
-      workspaceId ?? null,
-      filterKey,
-      cursor ?? null,
-    ],
+    (
+      workspaceId: string | null | undefined,
+      filterKey: string,
+      cursor?: string | null,
+      visibility?: 'private' | 'public' | null,
+    ) => ['work:workspace', workspaceId ?? null, filterKey, cursor ?? null, visibility ?? null],
   ),
 };
 
@@ -340,6 +537,9 @@ export const agentConfigKeys = {
   available: def('agent:available', () => ['agent:available']),
   config: def('agent:config', (agentId: string) => ['agent:config', agentId]),
   search: def('agent:search', (keyword?: string) => ['agent:search', keyword]),
+  serverDefaultHeterogeneousCapability: def('agent:serverDefaultHeterogeneousCapability', () => [
+    'agent:serverDefaultHeterogeneousCapability',
+  ]),
 };
 
 // ---- aiModel ------------------------------------------------------------
@@ -350,6 +550,11 @@ export const aiModelKeys = {
     offset,
   ]),
   list: def('aiModel:list', (provider: string | undefined) => ['aiModel:list', provider]),
+  reasoningConfig: def('aiModel:reasoningConfig', (provider: string, model: string) => [
+    'aiModel:reasoningConfig',
+    provider,
+    model,
+  ]),
 };
 
 // ---- image generation ---------------------------------------------------
@@ -586,12 +791,14 @@ export const evalKeys = {
   benchmarks: def('eval:benchmarks', () => ['eval:benchmarks']),
   datasetDetail: def('eval:datasetDetail', (id: string) => ['eval:datasetDetail', id]),
   datasetRuns: def('eval:datasetRuns', (datasetId: string) => ['eval:datasetRuns', datasetId]),
+  datasetsAll: def('eval:datasetsAll', () => ['eval:datasetsAll']),
   datasets: def('eval:datasets', (benchmarkId: string) => ['eval:datasets', benchmarkId]),
   experimentDetail: def('eval:experimentDetail', (id: string) => ['eval:experimentDetail', id]),
   experiments: def('eval:experiments', () => ['eval:experiments']),
   runDetail: def('eval:runDetail', (id: string) => ['eval:runDetail', id]),
   runResults: def('eval:runResults', (id: string) => ['eval:runResults', id]),
   runs: def('eval:runs', (benchmarkId?: string) => ['eval:runs', benchmarkId]),
+  testCaseDetail: def('eval:testCaseDetail', (id: string) => ['eval:testCaseDetail', id]),
   testCases: def('eval:testCases', (datasetId: string, limit?: number, offset?: number) => [
     'eval:testCases',
     datasetId,
@@ -630,6 +837,11 @@ export const knowledgeBaseKeys = {
 
 // ---- device -------------------------------------------------------------
 export const deviceKeys = {
+  browseDirectory: def(
+    'device:browseDirectory',
+    (workspaceId: string | null, deviceId: string, path?: string, cursor?: string) =>
+      ['device:browseDirectory', workspaceId, deviceId, path, cursor] as const,
+  ),
   gitAheadBehind: def('device:gitAheadBehind', (deviceId: string, path: string) => [
     'device:gitAheadBehind',
     deviceId,
@@ -653,6 +865,35 @@ export const deviceKeys = {
       path,
       branch,
       ...(pullRequestNumber === undefined ? [] : [pullRequestNumber]),
+    ],
+  ),
+  gitPullRequestDetail: def(
+    'device:gitPullRequestDetail',
+    (deviceId: string, path: string, number: number) => [
+      'device:gitPullRequestDetail',
+      deviceId,
+      path,
+      number,
+    ],
+  ),
+  gitPullRequestActivity: def(
+    'device:gitPullRequestActivity',
+    (deviceId: string, path: string, number: number) => [
+      'device:gitPullRequestActivity',
+      deviceId,
+      path,
+      number,
+    ],
+  ),
+  gitPullRequestMergeContext: def(
+    'device:gitPullRequestMergeContext',
+    (deviceId: string, path: string, number: number, headRefOid?: string, baseRefName?: string) => [
+      'device:gitPullRequestMergeContext',
+      deviceId,
+      path,
+      number,
+      ...(headRefOid === undefined ? [] : [headRefOid]),
+      ...(baseRefName === undefined ? [] : [baseRefName]),
     ],
   ),
   gitRemoteBranches: def('device:gitRemoteBranches', (deviceId: string, dirPath: string) => [
@@ -854,7 +1095,31 @@ export const messengerKeys = {
   ]),
 };
 
+// ---- scm (GitHub App integration) --------------------------------------
+export const scmKeys = {
+  changeRequests: def('scm:changeRequests', (workspaceId: string | null | undefined) => [
+    'scm:changeRequests',
+    workspaceId ?? null,
+  ]),
+  config: def('scm:config', () => ['scm:config']),
+  identity: def('scm:identity', (provider: string) => ['scm:identity', provider]),
+  installations: def('scm:installations', (workspaceId: string | null | undefined) => [
+    'scm:installations',
+    workspaceId ?? null,
+  ]),
+};
+
 // ---- verify (deliverable judging) ---------------------------------------
+export const expertiseKeys = {
+  domain: def('expertise:domain', (domainId: string) => ['expertise:domain', domainId]),
+  historyCount: def('expertise:historyCount', (agentId: string) => [
+    'expertise:historyCount',
+    agentId,
+  ]),
+  lesson: def('expertise:lesson', (lessonId: string) => ['expertise:lesson', lessonId]),
+  overview: def('expertise:overview', (agentId: string) => ['expertise:overview', agentId]),
+};
+
 export const verifyKeys = {
   acceptanceBundle: def('verify:acceptanceBundle', (acceptanceId: string) => [
     'verify:acceptanceBundle',
@@ -868,7 +1133,44 @@ export const verifyKeys = {
       subjectId,
     ],
   ),
-  acceptances: def('verify:acceptances', () => ['verify:acceptances']),
+  /** Statuses for a known subject set. Ids are sorted+joined so the key is order-free. */
+  acceptanceStatuses: def(
+    'verify:acceptanceStatuses',
+    (subjectType: string, subjectIds: string[]) => [
+      'verify:acceptanceStatuses',
+      subjectType,
+      [...subjectIds].sort().join(','),
+    ],
+  ),
+  /**
+   * One scroll page of the list panel. Keyed by workspace + the status split +
+   * the cursor, mirroring `reportSummaries` — the sibling paged feed.
+   */
+  acceptancePurgePreview: def('verify:acceptancePurgePreview', (acceptanceId: string) => [
+    'verify:acceptancePurgePreview',
+    acceptanceId,
+  ]),
+  acceptancePage: def(
+    'verify:acceptancePage',
+    (workspaceId: string | undefined, filter: string, projectId?: string, cursor?: string) => [
+      'verify:acceptancePage',
+      workspaceId ?? '',
+      filter,
+      projectId ?? '',
+      cursor ?? '',
+    ],
+  ),
+  /** Query inputs are part of the key so server-side list filtering never reuses stale rows. */
+  acceptances: def(
+    'verify:acceptances',
+    (limit?: number, q?: string, filter?: string, projectId?: string) => [
+      'verify:acceptances',
+      String(limit ?? ''),
+      q ?? '',
+      filter ?? '',
+      projectId ?? '',
+    ],
+  ),
   criteria: def('verify:criteria', () => ['verify:criteria']),
   instruction: def('verify:instruction', (documentId: string) => [
     'verify:instruction',
@@ -898,18 +1200,31 @@ export const verifyKeys = {
   tracing: def('verify:tracing', (tracingId: string) => ['verify:tracing', tracingId]),
 };
 
+/**
+ * Match every cached Acceptance list read — the flat window's filter / limit /
+ * search variants AND every loaded page of the panel's scroll feed. A write has
+ * no idea how deep the panel has scrolled, so it invalidates the whole family.
+ */
+export const isAcceptanceListKey = (key: unknown): boolean =>
+  Array.isArray(key) &&
+  (key[0] === verifyKeys.acceptances.root || key[0] === verifyKeys.acceptancePage.root);
+
 // ---- inbox / notifications ----------------------------------------------
 export const inboxKeys = {
+  navigationCounts: def('inbox:navigationCounts', (workspaceId: string | null) => [
+    'inbox:navigationCounts',
+    workspaceId,
+  ]),
   notifications: def(
     'inbox:notifications',
     // Keyed by context: the server scopes the inbox to the active workspace
     // (null = personal), so cached pages must never be reused across contexts.
-    (workspaceId: string | null, cursor: string | undefined, unreadOnly: boolean | undefined) => [
-      'inbox:notifications',
-      workspaceId,
-      cursor,
-      unreadOnly,
-    ],
+    (
+      workspaceId: string | null,
+      cursor: string | undefined,
+      category: string | undefined,
+      isRead: boolean | undefined,
+    ) => ['inbox:notifications', workspaceId, cursor, category, isRead],
   ),
   unreadCount: def('inbox:unreadCount', (workspaceId: string | null) => [
     'inbox:unreadCount',
@@ -917,14 +1232,27 @@ export const inboxKeys = {
   ]),
 };
 
-// ---- share (shared topic / page) ----------------------------------------
+// ---- share (shared agent / topic / page) ---------------------------------
 export const shareKeys = {
+  agentInfo: def('share:agentInfo', (slugOrId: string) => ['share:agentInfo', slugOrId]),
+  // Creator-side share status keyed by agentId (visitor side uses `agentInfo`).
+  agentShareStats: def('share:agentShareStats', (agentId: string) => [
+    'share:agentShareStats',
+    agentId,
+  ]),
+  agentShareStatus: def('share:agentShareStatus', (agentId: string) => [
+    'share:agentShareStatus',
+    agentId,
+  ]),
+  artifact: def('share:artifact', (id: string) => ['share:artifact', id]),
   pageDocument: def('share:pageDocument', (documentId: string) => [
     'share:pageDocument',
     documentId,
   ]),
   topic: def('share:topic', (id: string) => ['share:topic', id]),
   topicInfo: def('share:topicInfo', (topicId: string) => ['share:topicInfo', topicId]),
+  /** The visitor's own topics under an agent share (server-scoped by senderId). */
+  visitorTopics: def('share:visitorTopics', (shareId: string) => ['share:visitorTopics', shareId]),
 };
 
 // ---- fork source (community detail) -------------------------------------
@@ -1083,7 +1411,30 @@ export const resourceKeys = {
     params,
     workspaceId,
   ]),
-  search: def('resource:search', (params: unknown) => ['resource:search', params]),
+  // Every Resources cache entry is workspace-scoped: the same visibility means
+  // different rows in each workspace, so leaving `workspaceId` out of the key
+  // makes a workspace switch serve the previous workspace's rows from cache.
+  recentFiles: def(
+    'resource:recentFiles',
+    (workspaceId: string | null, visibility?: 'private' | 'public') => [
+      'resource:recentFiles',
+      workspaceId,
+      visibility ?? null,
+    ],
+  ),
+  recentPages: def(
+    'resource:recentPages',
+    (workspaceId: string | null, visibility?: 'private' | 'public') => [
+      'resource:recentPages',
+      workspaceId,
+      visibility ?? null,
+    ],
+  ),
+  search: def('resource:search', (params: unknown, workspaceId: string | null) => [
+    'resource:search',
+    params,
+    workspaceId,
+  ]),
 };
 export const providerKeys = {
   clientConfig: def('provider:clientConfig', (id: string) => ['provider:clientConfig', id]),
@@ -1104,7 +1455,11 @@ export const userKeys = {
   initState: def('user:initState', () => ['user:initState']),
 };
 export const builtinAgentKeys = {
-  init: def('builtinAgent:init', (slug: string) => ['builtinAgent:init', slug]),
+  init: def('builtinAgent:init', (slug: string, scope: string) => [
+    'builtinAgent:init',
+    slug,
+    scope,
+  ]),
 };
 export const imessageKeys = {
   bridgeStatus: def('imessage:bridgeStatus', () => ['imessage:bridgeStatus']),
@@ -1155,10 +1510,12 @@ export const swrKeys = {
   document: documentSWRKeys,
   electron: electronKeys,
   eval: evalKeys,
+  expertise: expertiseKeys,
   favorite: favoriteKeys,
   file: fileKeys,
   fork: forkKeys,
   gateway: gatewayKeys,
+  goal: goalKeys,
   global: globalKeys,
   group: groupKeys,
   home: homeKeys,
@@ -1169,6 +1526,7 @@ export const swrKeys = {
   localFile: localFileKeys,
   message: messageKeys,
   messenger: messengerKeys,
+  scm: scmKeys,
   notebook: notebookSWRKeys,
   ollama: ollamaKeys,
   onboarding: onboardingKeys,
@@ -1189,6 +1547,9 @@ export const swrKeys = {
   tool: toolKeys,
   topic: topicKeys,
   topicComment: topicCommentKeys,
+  acceptanceComment: acceptanceCommentKeys,
+  documentComment: documentCommentKeys,
+  documentLike: documentLikeKeys,
   topicAction: topicActionKeys,
   user: userKeys,
   userMemory: userMemoryKeys,

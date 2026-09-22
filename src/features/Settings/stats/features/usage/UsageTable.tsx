@@ -1,15 +1,16 @@
-import { ProviderIcon } from '@lobehub/icons';
-import { Flexbox, Text, Tooltip } from '@lobehub/ui';
+import { Flexbox, Tooltip } from '@lobehub/ui';
+import { Text } from '@lobehub/ui/base-ui';
 import { type TableColumnType } from 'antd';
 import { createStaticStyles, cssVar } from 'antd-style';
 import { memo, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import InlineTable from '@/components/InlineTable';
+import { ProviderIcon } from '@/components/LobeIcons';
 import SpendType, { type SpendTypeValue } from '@/components/SpendType';
 import TablePagination from '@/components/TablePagination';
 import TotalToken from '@/components/TotalToken';
-import { parseAsInteger, useQueryParam } from '@/hooks/useQueryParam';
+import { parseAsInteger, useQueryStates } from '@/hooks/useQueryParam';
 import { useClientDataSWR } from '@/libs/swr';
 import { statsKeys } from '@/libs/swr/keys';
 import { usageService } from '@/services/usage';
@@ -19,6 +20,7 @@ import { type UsageChartProps } from '../../types';
 
 /** Sizes small enough to keep the table from crowding out the rest of the page. */
 const PAGE_SIZE_OPTIONS = [5, 10, 20, 50];
+const DEFAULT_PAGE_SIZE = PAGE_SIZE_OPTIONS[0];
 
 /**
  * Sortable columns and the number each row sorts by. Pagination is ours now, so
@@ -53,12 +55,16 @@ const UsageTable = memo<UsageChartProps>(({ dateStrings }) => {
     usageService.findByMonth(dateStrings),
   );
 
-  const [currentPage, setCurrentPage] = useQueryParam('current', parseAsInteger.withDefault(1), {
-    clearOnDefault: true,
-  });
-  const [pageSize, setPageSize] = useQueryParam('pageSize', parseAsInteger.withDefault(5), {
-    clearOnDefault: true,
-  });
+  // Page and page size move together — the size picker keeps the first visible
+  // row in view, so it recalculates the page as well. One update, one
+  // navigation: see `useQueryStates`.
+  const [{ current: currentPage, pageSize }, setPagination] = useQueryStates(
+    {
+      current: parseAsInteger.withDefault(1),
+      pageSize: parseAsInteger.withDefault(DEFAULT_PAGE_SIZE),
+    },
+    { clearOnDefault: true },
+  );
   const [sort, setSort] = useState<SortState | null>(null);
 
   useEffect(() => {
@@ -181,7 +187,7 @@ const UsageTable = memo<UsageChartProps>(({ dateStrings }) => {
           setSort(next?.order && SORT_VALUES[field] ? { field, order: next.order } : null);
           // A re-sort makes the current page a different set of rows; start
           // from the top rather than dropping the reader into the middle.
-          setCurrentPage(1);
+          setPagination({ current: 1 });
         }}
       />
       {total > 0 && (
@@ -191,10 +197,9 @@ const UsageTable = memo<UsageChartProps>(({ dateStrings }) => {
           pageSize={pageSize}
           pageSizeOptions={PAGE_SIZE_OPTIONS}
           total={total}
-          onChange={(nextPage, nextPageSize) => {
-            setCurrentPage(nextPage);
-            setPageSize(nextPageSize);
-          }}
+          onChange={(nextPage, nextPageSize) =>
+            setPagination({ current: nextPage, pageSize: nextPageSize })
+          }
         />
       )}
     </>

@@ -8,6 +8,8 @@ import { DocumentLoadPosition, getDocumentTemplate, PolicyLoad } from '@lobechat
 import { buildAgentSkillIdentifier } from '@lobechat/const';
 import type { LobeChatDatabase } from '@lobechat/database';
 import { DOCUMENT_FOLDER_TYPE } from '@lobechat/database/schemas';
+import type { DocumentAccessScope } from '@lobechat/types';
+import { ordinaryDocumentAccessScope } from '@lobechat/types';
 
 import type {
   AgentDocument,
@@ -24,6 +26,7 @@ import {
   deriveAgentDocumentFields,
   extractMarkdownH1Title,
 } from '@/database/models/agentDocuments';
+import { FileModel } from '@/database/models/file';
 import { TopicDocumentModel } from '@/database/models/topicDocument';
 import { isUuid } from '@/database/utils/uuid';
 
@@ -31,6 +34,7 @@ import { AgentDocumentVfsError } from '../agentDocumentVfs/errors';
 import { isManagedSkillDocument } from '../agentDocumentVfs/mounts/skills/providers/providerSkillsAgentDocumentUtils';
 import { DocumentService } from '../document';
 import { TOOL_RESULTS_DIR_NAME } from '../toolExecution/constants';
+import { isRawTextAgentDocument } from './contentFormat';
 import {
   type AgentDocumentLiteXMLOperation,
   applyLiteXMLOperations,
@@ -39,13 +43,20 @@ import {
 } from './headlessEditor';
 
 const MAX_UNIQUE_FILENAME_ATTEMPTS = 1000;
-
 const appendFilenameSuffix = (filename: string, suffix: number): string => {
   const dotIndex = filename.lastIndexOf('.');
 
   if (dotIndex <= 0) return `${filename}-${suffix}`;
 
   return `${filename.slice(0, dotIndex)}-${suffix}${filename.slice(dotIndex)}`;
+};
+
+const appendSpacedFilenameSuffix = (filename: string, suffix: number): string => {
+  const dotIndex = filename.lastIndexOf('.');
+
+  if (dotIndex <= 0) return `${filename} ${suffix}`;
+
+  return `${filename.slice(0, dotIndex)} ${suffix}${filename.slice(dotIndex)}`;
 };
 
 interface UpsertDocumentParams {
@@ -64,6 +75,7 @@ interface UpsertDocumentParams {
 
 interface CreateAgentDocumentOptions {
   hintIsSkill?: boolean;
+  parentId?: string;
 }
 
 type AgentDocumentWithLiteXML = AgentDocument & { litexml?: string };
@@ -143,6 +155,7 @@ const toAgentDocumentContextPayload = (
 export class AgentDocumentsService {
   private agentDocumentModel: AgentDocumentModel;
   private documentService: DocumentService;
+  private fileModel: FileModel;
   private topicDocumentModel: TopicDocumentModel;
 
   constructor(
@@ -150,13 +163,21 @@ export class AgentDocumentsService {
     userId: string,
     workspaceId?: string,
     callerAgentVisibility?: 'private' | 'public' | null,
+    documentAccessScope: DocumentAccessScope = ordinaryDocumentAccessScope,
   ) {
-    this.agentDocumentModel = new AgentDocumentModel(db, userId, workspaceId);
+    this.agentDocumentModel = new AgentDocumentModel(db, userId, workspaceId, documentAccessScope);
     // Public-agent gate flows through DocumentService → DocumentModel so
     // agentDocuments list / attach / read cannot see the caller's own
     // private documents when the invoking agent itself is workspace-public.
-    this.documentService = new DocumentService(db, userId, workspaceId, callerAgentVisibility);
-    this.topicDocumentModel = new TopicDocumentModel(db, userId, workspaceId);
+    this.documentService = new DocumentService(
+      db,
+      userId,
+      workspaceId,
+      callerAgentVisibility,
+      documentAccessScope,
+    );
+    this.fileModel = new FileModel(db, userId, workspaceId);
+    this.topicDocumentModel = new TopicDocumentModel(db, userId, workspaceId, documentAccessScope);
   }
 
   private async projectDocumentContent<T extends ProjectableAgentDocument>(doc: T): Promise<T>;
@@ -200,24 +221,28 @@ export class AgentDocumentsService {
   }
 
   private async attachLiteXML(doc: AgentDocument): Promise<AgentDocumentWithLiteXML> {
+    if (isRawTextAgentDocument(doc)) return doc;
+
     const snapshot = await exportEditorDataSnapshot({
       editorData: doc.editorData,
       fallbackContent: doc.content,
       litexml: true,
     });
 
-    // Hydration of stale editorData (older Lexical schemas) can silently fail
-    // and leave the editor empty. When that happens, hydrate from the markdown
-    // column directly so readDocument never returns an empty doc for a row that
-    // actually has content.
-    if (snapshot.content.trim().length === 0 && doc.content.trim().length > 0) {
-      const fromMarkdown = await exportEditorDataSnapshot({
-        editorData: undefined,
-        fallbackContent: doc.content,
-        litexml: true,
+    if (snapshot.recoveredFromMarkdown) {
+      // Persist the repaired snapshot before exposing its LiteXML IDs. A later
+      // node edit must hydrate this exact state or the IDs can no longer target it.
+      await this.agentDocumentModel.update(doc.id, {
+        content: snapshot.content,
+        editorData: snapshot.editorData,
       });
-      const content = fromMarkdown.content.trim().length > 0 ? fromMarkdown.content : doc.content;
-      return { ...doc, content, litexml: fromMarkdown.litexml };
+
+      return {
+        ...doc,
+        content: snapshot.content,
+        editorData: snapshot.editorData,
+        litexml: snapshot.litexml,
+      };
     }
 
     return { ...doc, content: snapshot.content, litexml: snapshot.litexml };
@@ -231,6 +256,7 @@ export class AgentDocumentsService {
       loadPosition?: DocumentLoadPosition;
       loadRules?: DocumentLoadRules;
       metadata?: Record<string, unknown>;
+      parentId?: string;
       policy?: AgentDocumentPolicy;
       templateId?: string;
     },
@@ -240,7 +266,13 @@ export class AgentDocumentsService {
     let filename = baseFilename;
     let suffix = 2;
 
-    while (await this.agentDocumentModel.findByFilename(agentId, filename)) {
+    while (
+      await this.agentDocumentModel.findByParentAndFilename(
+        agentId,
+        params?.parentId ?? null,
+        filename,
+      )
+    ) {
       if (suffix > MAX_UNIQUE_FILENAME_ATTEMPTS) {
         throw new Error(
           `Unable to generate a unique filename for "${title}" after ${MAX_UNIQUE_FILENAME_ATTEMPTS} attempts.`,
@@ -505,12 +537,75 @@ export class AgentDocumentsService {
     return this.agentDocumentModel.associate({ agentId, documentId });
   }
 
+  /**
+   * Attach an uploaded file to the agent's document tree without converting its bytes.
+   *
+   * Use when:
+   * - An upload has completed and needs an entry in the agent's space.
+   *
+   * Expects:
+   * - An accessible file and, when supplied, a folder belonging to this agent.
+   *
+   * Returns:
+   * - A new file-backed document binding with a unique filename in its parent.
+   */
+  async importFile(agentId: string, fileId: string, parentId?: string | null) {
+    const file = await this.fileModel.findById(fileId);
+    if (!file) throw new Error(`File not found: ${fileId}`);
+
+    if (parentId) {
+      const parent = await this.agentDocumentModel.findByDocumentId(agentId, parentId);
+      if (!parent) throw new Error(`Parent folder not found: ${parentId}`);
+      if (parent.fileType !== DOCUMENT_FOLDER_TYPE) {
+        throw new Error(`Parent document is not a folder: ${parentId}`);
+      }
+    }
+
+    const resolvedParentId = parentId ?? null;
+    const baseFilename = buildDocumentFilename(file.name);
+    let filename = baseFilename;
+    let suffix = 2;
+
+    while (
+      await this.agentDocumentModel.findByParentAndFilename(agentId, resolvedParentId, filename)
+    ) {
+      if (suffix > MAX_UNIQUE_FILENAME_ATTEMPTS) {
+        throw new Error(
+          `Unable to generate a unique filename for "${file.name}" after ${MAX_UNIQUE_FILENAME_ATTEMPTS} attempts.`,
+        );
+      }
+
+      filename = appendSpacedFilenameSuffix(baseFilename, suffix);
+      suffix += 1;
+    }
+
+    const createParams = {
+      fileId: file.id,
+      fileType: file.fileType || 'application/octet-stream',
+      ...(resolvedParentId ? { parentId: resolvedParentId } : {}),
+      source: file.url,
+      sourceType: 'file' as const,
+      title: file.name,
+    };
+
+    // Imported bytes stay in files; preview reads the original rather than an editable copy.
+    return this.agentDocumentModel.create(agentId, filename, '', createParams);
+  }
+
   async createDocument(
     agentId: string,
     title: string,
     content: string,
     options: CreateAgentDocumentOptions = {},
   ) {
+    if (options.parentId) {
+      const parent = await this.agentDocumentModel.findByDocumentId(agentId, options.parentId);
+      if (!parent) throw new Error(`Parent folder not found: ${options.parentId}`);
+      if (parent.fileType !== DOCUMENT_FOLDER_TYPE) {
+        throw new Error(`Parent document is not a folder: ${options.parentId}`);
+      }
+    }
+
     const { title: extractedTitle, content: strippedContent } = extractMarkdownH1Title(content);
     const finalTitle = extractedTitle || title;
     const metadata = options.hintIsSkill
@@ -522,12 +617,10 @@ export class AgentDocumentsService {
         }
       : undefined;
 
-    return this.createWithUniqueFilename(
-      agentId,
-      finalTitle,
-      strippedContent,
-      metadata ? { metadata } : undefined,
-    );
+    return this.createWithUniqueFilename(agentId, finalTitle, strippedContent, {
+      ...(metadata ? { metadata } : {}),
+      ...(options.parentId ? { parentId: options.parentId } : {}),
+    });
   }
 
   async createForTopic(
@@ -765,13 +858,19 @@ export class AgentDocumentsService {
     const doc = await this.getDocumentByIdInAgent(documentId, expectedAgentId);
     if (!doc) return undefined;
 
-    await this.documentService.trySaveCurrentDocumentHistory(doc.documentId, 'llm_call');
-
     const snapshot = await applyLiteXMLOperations({
       editorData: doc.editorData,
       fallbackContent: doc.content,
       operations,
     });
+
+    // History must capture the successfully hydrated pre-edit state. Persisted
+    // editorData may be the stale payload that forced Markdown recovery.
+    await this.documentService.trySaveCurrentDocumentHistory(
+      doc.documentId,
+      'llm_call',
+      snapshot.previousEditorData,
+    );
 
     await this.agentDocumentModel.update(documentId, {
       content: snapshot.content,

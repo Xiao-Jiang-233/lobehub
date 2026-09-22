@@ -2,8 +2,8 @@
 
 import { DEFAULT_AVATAR } from '@lobechat/const';
 import { agentDisplayName, type SidebarAgentItem } from '@lobechat/types';
-import { Avatar, Center, Empty, Flexbox, Icon, SearchBar, Text, Tooltip } from '@lobehub/ui';
-import { Button, DropdownMenu, Segmented, toast } from '@lobehub/ui/base-ui';
+import { Center, Empty, Flexbox, Icon, SearchBar, Tooltip } from '@lobehub/ui';
+import { Avatar, Button, DropdownMenu, Segmented, Text, toast } from '@lobehub/ui/base-ui';
 import { createStaticStyles, cssVar, cx } from 'antd-style';
 import dayjs from 'dayjs';
 import isEqual from 'fast-deep-equal';
@@ -656,12 +656,10 @@ AgentViewAllPage.displayName = 'AgentViewAllPage';
 // blank-agent creation, and that modal lives in AgentModalContext — normally
 // mounted by the Home layout, which this standalone route is NOT inside. Wrap
 // the page so the "+" menu opens the same create wizard as the sidebar.
-const AgentViewAllPageWithModals = memo(() => (
+const AgentViewAllPageWithModals = () => (
   <AgentModalProvider>
     <AgentViewAllPage />
   </AgentModalProvider>
-));
-
-AgentViewAllPageWithModals.displayName = 'AgentViewAllPageWithModals';
+);
 
 export default AgentViewAllPageWithModals;

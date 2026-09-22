@@ -1,4 +1,5 @@
-import type { AlertProps, AvatarProps, DivProps, FlexboxProps } from '@lobehub/ui';
+import type { DivProps, FlexboxProps } from '@lobehub/ui';
+import { type AlertProps, type AvatarProps } from '@lobehub/ui/base-ui';
 import type { EditableMessageProps, MetaData } from '@lobehub/ui/chat';
 import type { ReactNode } from 'react';
 
@@ -35,6 +36,8 @@ export interface ChatItemProps extends Omit<FlexboxProps, 'children' | 'onChange
    */
   error?: AlertProps;
   fontSize?: number;
+  /** Rendered in the header row next to the time, independent of `showTitle`. */
+  headerAddon?: ReactNode;
   /**
    * @description Whether the chat item is in loading state
    */

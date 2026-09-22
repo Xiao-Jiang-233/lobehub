@@ -1,9 +1,8 @@
 'use client';
 
 import type { DropdownItem } from '@lobehub/ui';
-import { Block, Flexbox, Icon, Text } from '@lobehub/ui';
-import { confirmModal, type ModalInstance } from '@lobehub/ui/base-ui';
-import { toast } from '@lobehub/ui/base-ui';
+import { Block, copyToClipboard, Flexbox, Icon } from '@lobehub/ui';
+import { confirmModal, type ModalInstance, Text, toast } from '@lobehub/ui/base-ui';
 import {
   Clock3Icon,
   Copy,
@@ -24,6 +23,7 @@ import { useAuthorInfo } from '@/business/client/hooks/useAuthorInfo';
 import { openRenameModal } from '@/components/RenameModal';
 import { DOCUMENT_HISTORY_QUERY_LIST_LIMIT } from '@/const/documentHistory';
 import { isDesktop } from '@/const/version';
+import { useAgentContext } from '@/features/Conversation/useAgentContext';
 import { confirmRemoveTopic } from '@/features/DeleteTopicConfirm';
 import { openDocumentCompareModal } from '@/features/PageEditor/History/CompareModal';
 import { formatHistoryAbsoluteTime } from '@/features/PageEditor/History/formatHistoryDate';
@@ -76,9 +76,11 @@ export const useMenu = (): { menuHeader?: ReactNode; menuItems: () => DropdownIt
   ]);
   const openTopicInNewWindow = useGlobalStore((s) => s.openTopicInNewWindow);
 
-  const activeAgentId = useChatStore((s) => s.activeAgentId);
-  const activeTopic = useChatStore(topicSelectors.currentActiveTopic);
-  const workingDirectory = useChatStore(topicSelectors.currentTopicWorkingDirectory);
+  const { agentId: activeAgentId, topicId: routeTopicId } = useAgentContext();
+  const activeTopic = useChatStore((s) =>
+    routeTopicId ? topicSelectors.getTopicById(routeTopicId)(s) : undefined,
+  );
+  const workingDirectory = useChatStore(topicSelectors.getTopicWorkingDirectory(routeTopicId));
   const [autoRenameTopicTitle, favoriteTopic, removeTopic, updateTopicTitle] = useChatStore((s) => [
     s.autoRenameTopicTitle,
     s.favoriteTopic,
@@ -277,8 +279,8 @@ export const useMenu = (): { menuHeader?: ReactNode; menuItems: () => DropdownIt
           icon: <Icon icon={Hash} />,
           key: 'copySessionId',
           label: t('actions.copySessionId', { ns: 'topic' }),
-          onClick: () => {
-            void navigator.clipboard.writeText(topicId);
+          onClick: async () => {
+            await copyToClipboard(topicId);
             toast.success(t('actions.copySessionIdSuccess', { ns: 'topic' }));
           },
         },

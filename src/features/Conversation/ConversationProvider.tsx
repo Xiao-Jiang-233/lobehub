@@ -29,7 +29,7 @@ interface ConversationContextPrefetcherProps {
 }
 
 const ConversationContextPrefetcher = memo<ConversationContextPrefetcherProps>(({ context }) => {
-  useFetchAvailableAgents(!context.topicShareId && !!context.agentId);
+  useFetchAvailableAgents(!context.topicShareId && !context.agentShareId && !!context.agentId);
 
   return null;
 });
@@ -127,7 +127,6 @@ export const ConversationProvider = memo<ConversationProviderProps>(
 
     return (
       <Provider
-        key={contextKey}
         createStore={() =>
           createStore({
             composerTarget: resolvedComposerTarget,

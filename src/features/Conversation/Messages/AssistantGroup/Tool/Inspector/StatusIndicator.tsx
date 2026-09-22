@@ -1,12 +1,22 @@
 import { type ToolIntervention } from '@lobechat/types';
 import { Block, Icon, Tooltip } from '@lobehub/ui';
 import { cssVar } from 'antd-style';
-import { AlertTriangle, Ban, Check, HandIcon, type LucideIcon, PauseIcon, X } from 'lucide-react';
+import {
+  AlertTriangle,
+  Ban,
+  Check,
+  CornerUpRight,
+  HandIcon,
+  type LucideIcon,
+  PauseIcon,
+  X,
+} from 'lucide-react';
 import { memo } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import NeuralNetworkLoading from '@/components/NeuralNetworkLoading';
-import { LOADING_FLAT } from '@/const/message';
+
+import { hasToolResultBody } from '../toolResultBody';
 
 interface StatusIndicatorProps {
   intervention?: ToolIntervention;
@@ -31,7 +41,7 @@ const StatusIndicator = memo<StatusIndicatorProps>(
     const { t } = useTranslation('chat');
 
     const hasError = !!result?.error;
-    const hasSuccessResult = !!result?.content && result.content !== LOADING_FLAT;
+    const hasSuccessResult = hasToolResultBody(result);
     const hasResult = hasSuccessResult || hasError;
     const isPending = intervention?.status === 'pending';
     const isReject = intervention?.status === 'rejected';
@@ -49,7 +59,13 @@ const StatusIndicator = memo<StatusIndicatorProps>(
         </Tooltip>
       );
     } else if (isReject) {
-      icon = (
+      // A user skip (e.g. AskUserQuestion) is a normal outcome, not a denial —
+      // keep the glyph and copy neutral instead of the rejection ban sign.
+      icon = intervention?.skipped ? (
+        <Tooltip title={t('tool.intervention.toolSkipped')}>
+          <Icon color={cssVar.colorTextTertiary} icon={CornerUpRight} />
+        </Tooltip>
+      ) : (
         <Tooltip title={t('tool.intervention.toolRejected')}>
           <Icon color={cssVar.colorTextTertiary} icon={Ban} />
         </Tooltip>
